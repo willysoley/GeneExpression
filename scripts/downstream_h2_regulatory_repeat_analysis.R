@@ -40,6 +40,7 @@ defaults <- list(
   open_url = "https://downloads.wenglab.org/Registry-V4/GRCh38-cCREs.bed",
   rmsk_url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/rmsk.txt.gz"
 )
+standard_chr <- paste0("chr", c(1:22, "X", "Y", "M", "MT"))
 
 # ------------------------------ HELPERS ---------------------------------------
 stop_if_missing <- function(path, label) {
@@ -93,6 +94,104 @@ to_ucsc_style <- function(gr) {
   }
 
   out
+}
+
+keep_standard_chr <- function(gr) {
+  keep <- as.character(seqnames(gr)) %in% standard_chr
+  gr[keep]
+}
+
+detect_chr_col <- function(dt) {
+  scores <- seq_len(ncol(dt)) %>%
+    lapply(function(i) {
+      x <- as.character(dt[[i]])
+      mean(x %in% standard_chr, na.rm = TRUE)
+    }) %>%
+    unlist()
+
+  if (length(scores) == 0L || max(scores, na.rm = TRUE) < 0.05) {
+    return(NA_integer_)
+  }
+
+  which.max(scores)
+}
+
+detect_start_end_cols <- function(dt, chr_col) {
+  num_cols <- seq_len(ncol(dt)) %>%
+    lapply(function(i) suppressWarnings(as.numeric(dt[[i]])))
+
+  best <- list(score = -Inf, start_col = NA_integer_, end_col = NA_integer_)
+
+  for (start_col in seq_len(ncol(dt))) {
+    for (end_col in seq_len(ncol(dt))) {
+      if (start_col == end_col || start_col == chr_col || end_col == chr_col) {
+        next
+      }
+
+      start_num <- num_cols[[start_col]]
+      end_num <- num_cols[[end_col]]
+      ok <- is.finite(start_num) & is.finite(end_num) & end_num > start_num
+      score <- mean(ok, na.rm = TRUE)
+
+      if (start_col == chr_col + 1L && end_col == chr_col + 2L) {
+        score <- score + 0.25
+      }
+
+      if (is.finite(score) && score > best$score) {
+        best <- list(score = score, start_col = start_col, end_col = end_col)
+      }
+    }
+  }
+
+  if (!is.finite(best$score) || best$score < 0.20) {
+    stop("Could not detect start/end coordinate columns in BED-like input.")
+  }
+
+  best
+}
+
+import_bed_like <- function(path, label) {
+  gr_try <- tryCatch(import(path, format = "BED"), error = function(e) NULL)
+
+  if (!is.null(gr_try)) {
+    seqn <- as.character(seqnames(gr_try))
+    chr_fraction <- mean(seqn %in% standard_chr, na.rm = TRUE)
+
+    if (is.finite(chr_fraction) && chr_fraction > 0.80) {
+      return(gr_try)
+    }
+  }
+
+  message("Re-parsing ", label, " as BED-like table: ", path)
+  dt <- fread(path, sep = "\t", header = FALSE, fill = TRUE, comment.char = "#")
+
+  if (nrow(dt) == 0L || ncol(dt) < 3L) {
+    stop("BED-like annotation file is empty or has fewer than 3 columns: ", path)
+  }
+
+  chr_col <- detect_chr_col(dt)
+  if (is.na(chr_col)) {
+    stop("Could not detect chromosome column in BED-like file: ", path)
+  }
+
+  se_cols <- detect_start_end_cols(dt, chr_col)
+  chr <- as.character(dt[[chr_col]])
+  start_num <- suppressWarnings(as.numeric(dt[[se_cols$start_col]]))
+  end_num <- suppressWarnings(as.numeric(dt[[se_cols$end_col]]))
+
+  keep <- chr %in% standard_chr & is.finite(start_num) & is.finite(end_num) & end_num > start_num
+  if (!any(keep)) {
+    stop("No valid genomic intervals found after BED-like parsing: ", path)
+  }
+
+  GRanges(
+    seqnames = chr[keep],
+    ranges = IRanges(
+      start = as.integer(start_num[keep]) + 1L,
+      end = as.integer(end_num[keep])
+    ),
+    strand = "*"
+  )
 }
 
 symm_window <- function(gr_tss, flank_bp) {
@@ -374,13 +473,13 @@ if (is.null(open_path) || open_path == "") {
   )
 }
 
-enh_gr <- import(enhancer_path, format = "BED") %>%
+enh_gr <- import_bed_like(enhancer_path, label = "enhancer annotations") %>%
   to_ucsc_style() %>%
-  keepStandardChromosomes(pruning.mode = "coarse")
+  keep_standard_chr()
 
-open_gr <- import(open_path, format = "BED") %>%
+open_gr <- import_bed_like(open_path, label = "open-chromatin annotations") %>%
   to_ucsc_style() %>%
-  keepStandardChromosomes(pruning.mode = "coarse")
+  keep_standard_chr()
 
 reg_features <- count_overlaps_dt(tss_win_small, enh_gr, "enh_count_100kb") %>%
   merge(
