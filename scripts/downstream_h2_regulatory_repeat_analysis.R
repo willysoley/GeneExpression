@@ -29,6 +29,10 @@ cfg <- list(
   eur_pops = c("British", "Finnish", "Tuscan", "Utah"),
   tss_window_bp = 100000L,
   cis_window_bp = 1000000L,
+  enhancer_source = "roadmap_links",  # options: "roadmap_links", "window_count"
+  roadmap_links_dir = NULL,           # optional local dir with Roadmap link files
+  roadmap_links_url = "http://promoter.bx.psu.edu/hi-c/publication/data/Roadmap_links/",
+  roadmap_links_pattern = "_15_coreMarks_hg38lift_domains_p_gt_0\\.5\\.txt$",
   enhancer_bed = NULL,   # optional: use your own enhancer BED
   open_bed = NULL,       # optional: use your own ATAC/DNase/open BED
   repeat_rmsk = NULL     # optional: use your own UCSC rmsk.txt(.gz)
@@ -69,6 +73,26 @@ strip_gene_version <- function(x) {
   str_replace(x, "\\..*$", "")
 }
 
+sanitize_name <- function(x) {
+  x %>%
+    as.character() %>%
+    str_replace_all("[^A-Za-z0-9]+", "_")
+}
+
+normalize_chr <- function(x) {
+  y <- as.character(x)
+  y <- str_replace(y, "^chr", "")
+  y <- toupper(y)
+  y[y == "23"] <- "X"
+  y[y == "24"] <- "Y"
+  y[y == "MT"] <- "M"
+  paste0("chr", y)
+}
+
+is_chr_like <- function(x) {
+  normalize_chr(x) %in% standard_chr
+}
+
 safe_download <- function(url, dest_path) {
   if (file.exists(dest_path)) {
     message("Using existing: ", dest_path)
@@ -105,7 +129,7 @@ detect_chr_col <- function(dt) {
   scores <- seq_len(ncol(dt)) %>%
     lapply(function(i) {
       x <- as.character(dt[[i]])
-      mean(x %in% standard_chr, na.rm = TRUE)
+      mean(is_chr_like(x), na.rm = TRUE)
     }) %>%
     unlist()
 
@@ -175,7 +199,7 @@ import_bed_like <- function(path, label) {
   }
 
   se_cols <- detect_start_end_cols(dt, chr_col)
-  chr <- as.character(dt[[chr_col]])
+  chr <- normalize_chr(dt[[chr_col]])
   start_num <- suppressWarnings(as.numeric(dt[[se_cols$start_col]]))
   end_num <- suppressWarnings(as.numeric(dt[[se_cols$end_col]]))
 
@@ -281,6 +305,237 @@ count_by_group <- function(window_gr, feature_gr, feature_group, prefix) {
     x = class_tables,
     init = out
   )
+}
+
+sum_overlap_bp <- function(query_gr, subject_gr) {
+  hits <- findOverlaps(query_gr, subject_gr, ignore.strand = TRUE)
+  out <- numeric(length(query_gr))
+
+  if (length(hits) == 0L) {
+    return(out)
+  }
+
+  qh <- queryHits(hits)
+  sh <- subjectHits(hits)
+  ov_bp <- width(pintersect(query_gr[qh], subject_gr[sh]))
+  ov_sum <- tapply(ov_bp, qh, sum)
+  out[as.integer(names(ov_sum))] <- as.numeric(ov_sum)
+  out
+}
+
+count_and_bp_by_group <- function(window_gr, feature_gr, feature_group, prefix, suffix = "") {
+  class_levels <- feature_group %>%
+    unique() %>%
+    sort()
+  class_levels <- class_levels[!is.na(class_levels) & class_levels != ""]
+
+  out <- data.table(gene_id_clean = mcols(window_gr)$gene_id_clean)
+  if (length(class_levels) == 0L) {
+    return(list(table = out, class_names = character(0)))
+  }
+
+  class_names <- class_levels %>%
+    as.character() %>%
+    sanitize_name() %>%
+    make.unique()
+
+  for (i in seq_along(class_levels)) {
+    raw_cls <- class_levels[[i]]
+    cls <- class_names[[i]]
+    idx <- which(feature_group == raw_cls)
+    cls_gr <- feature_gr[idx]
+
+    count_col <- paste0(prefix, "_", cls, "_count", suffix)
+    bp_col <- paste0(prefix, "_", cls, "_bp", suffix)
+
+    out[[count_col]] <- as.integer(countOverlaps(window_gr, cls_gr, ignore.strand = TRUE))
+    out[[bp_col]] <- as.numeric(sum_overlap_bp(window_gr, cls_gr))
+  }
+
+  list(table = out, class_names = class_names)
+}
+
+resolve_roadmap_link_files <- function(cfg) {
+  if (!is.null(cfg$roadmap_links_dir) && dir.exists(cfg$roadmap_links_dir)) {
+    local_files <- list.files(
+      cfg$roadmap_links_dir,
+      pattern = cfg$roadmap_links_pattern,
+      full.names = TRUE
+    )
+    if (length(local_files) > 0L) {
+      message("Using local Roadmap link files from: ", cfg$roadmap_links_dir)
+      return(local_files)
+    }
+  }
+
+  local_dir <- file.path(cfg$resource_dir, "Roadmap_links")
+  dir.create(local_dir, recursive = TRUE, showWarnings = FALSE)
+
+  message("Fetching Roadmap links index: ", cfg$roadmap_links_url)
+  index_lines <- readLines(cfg$roadmap_links_url, warn = FALSE)
+
+  file_names <- index_lines %>%
+    str_match_all('href="([^"]+)"') %>%
+    .[[1]] %>%
+    .[, 2] %>%
+    basename() %>%
+    .[str_detect(., cfg$roadmap_links_pattern)] %>%
+    unique()
+
+  if (length(file_names) == 0L) {
+    stop("Could not find Roadmap link files from index: ", cfg$roadmap_links_url)
+  }
+
+  file_names %>%
+    lapply(function(fname) {
+      safe_download(
+        url = paste0(cfg$roadmap_links_url, fname),
+        dest_path = file.path(local_dir, fname)
+      )
+    }) %>%
+    unlist()
+}
+
+summarize_roadmap_link_file <- function(path, gene_lookup_dt) {
+  dt <- fread(path, sep = "\t", header = TRUE, fill = TRUE, showProgress = FALSE)
+  names(dt) <- make.names(names(dt), unique = TRUE)
+
+  gene_col <- intersect(c("targetGene", "target.gene", "TargetGene"), names(dt))[1]
+  start_col <- intersect(c("start", "Start"), names(dt))[1]
+  end_col <- intersect(c("end", "End"), names(dt))[1]
+  if (is.na(gene_col) || is.na(start_col) || is.na(end_col)) {
+    stop("Roadmap link file missing one of {targetGene,start,end}: ", path)
+  }
+
+  chr_col <- intersect(c("chr", "chrom", "chromosome", "X", "V1"), names(dt))[1]
+  chr_raw <- if (!is.na(chr_col)) {
+    dt[[chr_col]]
+  } else {
+    idx <- detect_chr_col(dt)
+    if (is.na(idx)) {
+      stop("Could not detect chromosome column in Roadmap file: ", path)
+    }
+    dt[[idx]]
+  }
+
+  link_dt <- data.table(
+    chr = normalize_chr(chr_raw),
+    start = suppressWarnings(as.numeric(dt[[start_col]])),
+    end = suppressWarnings(as.numeric(dt[[end_col]])),
+    gene_name = as.character(dt[[gene_col]])
+  ) %>%
+    .[
+      chr %in% standard_chr &
+        is.finite(start) &
+        is.finite(end) &
+        end > start &
+        !is.na(gene_name) &
+        gene_name != ""
+    ] %>%
+    .[
+      ,
+      enhancer_len := end - start
+    ] %>%
+    unique(by = c("chr", "start", "end", "gene_name")) %>%
+    merge(gene_lookup_dt, by = "gene_name", all = FALSE)
+
+  if (nrow(link_dt) == 0L) {
+    return(data.table(
+      gene_id_clean = character(0),
+      biosample = character(0),
+      enh_link_n = numeric(0),
+      enh_link_total_bp = numeric(0)
+    ))
+  }
+
+  biosample <- basename(path) %>%
+    str_extract("^E\\d+")
+  if (is.na(biosample)) {
+    biosample <- basename(path)
+  }
+
+  link_dt %>%
+    .[
+      ,
+      .(
+        enh_link_n = .N,
+        enh_link_total_bp = sum(enhancer_len)
+      ),
+      by = gene_id_clean
+    ] %>%
+    .[
+      ,
+      biosample := biosample
+    ]
+}
+
+build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
+  gene_lookup_dt <- gene_tbl %>%
+    .[
+      !is.na(gene_name) & gene_name != "",
+      .(gene_name, gene_id_clean)
+    ] %>%
+    unique(by = c("gene_name", "gene_id_clean"))
+
+  if (nrow(gene_lookup_dt) == 0L) {
+    stop("No gene_name to gene_id mapping available for Roadmap enhancer links.")
+  }
+
+  per_biosample <- roadmap_files %>%
+    lapply(function(f) {
+      message("Reading Roadmap links: ", basename(f))
+      summarize_roadmap_link_file(f, gene_lookup_dt = gene_lookup_dt)
+    }) %>%
+    rbindlist(fill = TRUE)
+
+  out <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
+    unique(by = "gene_id_clean")
+
+  if (nrow(per_biosample) == 0L) {
+    out[, `:=`(
+      enh_link_active_biosample_n = 0,
+      enh_link_mean_count_active = 0,
+      enh_link_mean_total_bp_active = 0
+    )]
+    return(out)
+  }
+
+  summary_dt <- per_biosample %>%
+    .[
+      enh_link_total_bp > 0
+    ] %>%
+    .[
+      ,
+      .(
+        enh_link_active_biosample_n = uniqueN(biosample),
+        enh_link_mean_count_active = mean(enh_link_n),
+        enh_link_mean_total_bp_active = mean(enh_link_total_bp)
+      ),
+      by = gene_id_clean
+    ]
+
+  out %>%
+    merge(summary_dt, by = "gene_id_clean", all.x = TRUE) %>%
+    .[
+      ,
+      `:=`(
+        enh_link_active_biosample_n = fifelse(is.na(enh_link_active_biosample_n), 0, enh_link_active_biosample_n),
+        enh_link_mean_count_active = fifelse(is.na(enh_link_mean_count_active), 0, enh_link_mean_count_active),
+        enh_link_mean_total_bp_active = fifelse(is.na(enh_link_mean_total_bp_active), 0, enh_link_mean_total_bp_active)
+      )
+    ]
+}
+
+build_log_terms <- function(dt, columns) {
+  valid_cols <- columns %>%
+    .[. %in% names(dt)] %>%
+    .[vapply(., function(col) {
+      x <- dt[[col]]
+      ok <- is.finite(x)
+      sum(ok) >= 5 && uniqueN(x[ok]) >= 2
+    }, logical(1))]
+
+  sprintf("scale(log1p(`%s`))", valid_cols)
 }
 
 # --------------------------- PREP OUTPUT DIRS ---------------------------------
@@ -455,14 +710,49 @@ tss_win_small <- symm_window(tss_gr, cfg$tss_window_bp)
 tss_win_cis <- symm_window(tss_gr, cfg$cis_window_bp)
 
 # ----------------------- 4) REGULATORY FEATURE COUNTS -------------------------
-message("Step 5: load enhancer/open annotations and count overlaps")
+message("Step 5: build enhancer and open-chromatin features")
 
-enhancer_path <- cfg$enhancer_bed
-if (is.null(enhancer_path) || enhancer_path == "") {
-  enhancer_path <- safe_download(
-    defaults$enhancer_url,
-    file.path(cfg$resource_dir, basename(defaults$enhancer_url))
+reg_features <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
+  unique(by = "gene_id_clean")
+
+if (identical(cfg$enhancer_source, "roadmap_links")) {
+  message("Enhancer mode: Roadmap enhancer-gene links (paper-style).")
+  roadmap_files <- resolve_roadmap_link_files(cfg)
+  message("Roadmap biosample files found: ", length(roadmap_files))
+
+  enh_features <- build_roadmap_enhancer_features(
+    roadmap_files = roadmap_files,
+    gene_tbl = gene_tbl
   )
+
+  reg_features <- reg_features %>%
+    merge(enh_features, by = "gene_id_clean", all.x = TRUE)
+} else if (identical(cfg$enhancer_source, "window_count")) {
+  message("Enhancer mode: fixed-window BED overlap counts.")
+
+  enhancer_path <- cfg$enhancer_bed
+  if (is.null(enhancer_path) || enhancer_path == "") {
+    enhancer_path <- safe_download(
+      defaults$enhancer_url,
+      file.path(cfg$resource_dir, basename(defaults$enhancer_url))
+    )
+  }
+
+  enh_gr <- import_bed_like(enhancer_path, label = "enhancer annotations") %>%
+    to_ucsc_style() %>%
+    keep_standard_chr()
+
+  enh_count_features <- count_overlaps_dt(tss_win_small, enh_gr, "enh_count_100kb") %>%
+    merge(
+      count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_1mb"),
+      by = "gene_id_clean",
+      all = TRUE
+    )
+
+  reg_features <- reg_features %>%
+    merge(enh_count_features, by = "gene_id_clean", all.x = TRUE)
+} else {
+  stop("Unknown cfg$enhancer_source: ", cfg$enhancer_source)
 }
 
 open_path <- cfg$open_bed
@@ -473,30 +763,19 @@ if (is.null(open_path) || open_path == "") {
   )
 }
 
-enh_gr <- import_bed_like(enhancer_path, label = "enhancer annotations") %>%
-  to_ucsc_style() %>%
-  keep_standard_chr()
-
 open_gr <- import_bed_like(open_path, label = "open-chromatin annotations") %>%
   to_ucsc_style() %>%
   keep_standard_chr()
 
-reg_features <- count_overlaps_dt(tss_win_small, enh_gr, "enh_count_100kb") %>%
-  merge(
-    count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_1mb"),
-    by = "gene_id_clean",
-    all = TRUE
-  ) %>%
-  merge(
-    count_overlaps_dt(tss_win_small, open_gr, "open_count_100kb"),
-    by = "gene_id_clean",
-    all = TRUE
-  ) %>%
+open_features <- count_overlaps_dt(tss_win_small, open_gr, "open_count_100kb") %>%
   merge(
     count_overlaps_dt(tss_win_cis, open_gr, "open_count_1mb"),
     by = "gene_id_clean",
     all = TRUE
   )
+
+reg_features <- reg_features %>%
+  merge(open_features, by = "gene_id_clean", all.x = TRUE)
 
 # ------------------------ 5) UCSC REPEATMASKER COUNTS -------------------------
 message("Step 6: load UCSC RepeatMasker annotations and summarize repeats")
@@ -542,19 +821,67 @@ rep_gr <- GRanges(
 )
 
 # Repeat features are window-based burdens near TSS, not gene-body overlap flags.
-repeat_features <- count_overlaps_dt(tss_win_small, rep_gr, "repeat_count_100kb") %>%
-  merge(
-    count_overlaps_dt(tss_win_cis, rep_gr, "repeat_count_1mb"),
-    by = "gene_id_clean",
-    all = TRUE
-  )
+repeat_features <- data.table(
+  gene_id_clean = mcols(tss_win_small)$gene_id_clean,
+  repeat_count_100kb = as.integer(countOverlaps(tss_win_small, rep_gr, ignore.strand = TRUE)),
+  repeat_bp_100kb = as.numeric(sum_overlap_bp(tss_win_small, rep_gr)),
+  repeat_count_1mb = as.integer(countOverlaps(tss_win_cis, rep_gr, ignore.strand = TRUE)),
+  repeat_bp_1mb = as.numeric(sum_overlap_bp(tss_win_cis, rep_gr))
+)
 
-repeat_class_dt <- count_by_group(
+repeat_class_obj <- count_and_bp_by_group(
   window_gr = tss_win_small,
   feature_gr = rep_gr,
   feature_group = mcols(rep_gr)$repClass,
-  prefix = "repeat_class"
+  prefix = "repeat_class",
+  suffix = "_100kb"
 )
+repeat_class_dt <- repeat_class_obj$table
+
+repeat_count_class_cols <- names(repeat_class_dt) %>%
+  str_subset("^repeat_class_.*_count_100kb$")
+repeat_bp_class_cols <- names(repeat_class_dt) %>%
+  str_subset("^repeat_class_.*_bp_100kb$")
+
+if (length(repeat_count_class_cols) > 0L) {
+  count_mat <- as.matrix(repeat_class_dt[, ..repeat_count_class_cols])
+  bp_mat <- if (length(repeat_bp_class_cols) > 0L) {
+    as.matrix(repeat_class_dt[, ..repeat_bp_class_cols])
+  } else {
+    matrix(0, nrow = nrow(repeat_class_dt), ncol = length(repeat_count_class_cols))
+  }
+  active_mat <- count_mat > 0
+  active_n <- rowSums(active_mat, na.rm = TRUE)
+
+  repeat_class_dt[, repeat_active_class_n_100kb := active_n]
+  repeat_class_dt[, repeat_mean_bp_active_class_100kb := fifelse(
+    active_n > 0,
+    rowSums(bp_mat * active_mat, na.rm = TRUE) / active_n,
+    0
+  )]
+  repeat_class_dt[, repeat_mean_count_active_class_100kb := fifelse(
+    active_n > 0,
+    rowSums(count_mat * active_mat, na.rm = TRUE) / active_n,
+    0
+  )]
+} else {
+  repeat_class_dt[, `:=`(
+    repeat_active_class_n_100kb = 0,
+    repeat_mean_bp_active_class_100kb = 0,
+    repeat_mean_count_active_class_100kb = 0
+  )]
+}
+
+for (cls in c("LINE", "SINE", "LTR", "DNA")) {
+  count_col <- paste0("repeat_class_", cls, "_count_100kb")
+  bp_col <- paste0("repeat_class_", cls, "_bp_100kb")
+  if (!count_col %in% names(repeat_class_dt)) {
+    repeat_class_dt[, (count_col) := 0]
+  }
+  if (!bp_col %in% names(repeat_class_dt)) {
+    repeat_class_dt[, (bp_col) := 0]
+  }
+}
 
 # --------------------------- 6) FINAL ANALYSIS TABLE --------------------------
 analysis_dt <- merged %>%
@@ -568,7 +895,7 @@ analysis_dt <- merged %>%
   merge(repeat_class_dt, by = "gene_id_clean", all.x = TRUE)
 
 count_cols <- names(analysis_dt) %>%
-  str_subset("^(enh_count_|open_count_|repeat_count_|repeat_class_)")
+  str_subset("^(enh_count_|enh_link_|open_count_|repeat_count_|repeat_bp_|repeat_class_)")
 
 if (length(count_cols) > 0L) {
   analysis_dt[, (count_cols) := lapply(
@@ -584,6 +911,28 @@ if (length(count_cols) > 0L) {
 fwrite(analysis_dt, file.path(cfg$output_dir, "gene_level_features.tsv"), sep = "\t")
 
 # ----------------------------- 7) SUMMARIES -----------------------------------
+expected_feature_cols <- c(
+  "enh_link_active_biosample_n",
+  "enh_link_mean_count_active",
+  "enh_link_mean_total_bp_active",
+  "enh_count_100kb",
+  "open_count_100kb",
+  "repeat_count_100kb",
+  "repeat_bp_100kb",
+  "repeat_active_class_n_100kb",
+  "repeat_mean_count_active_class_100kb",
+  "repeat_mean_bp_active_class_100kb",
+  "repeat_class_LINE_count_100kb",
+  "repeat_class_SINE_count_100kb",
+  "repeat_class_LINE_bp_100kb",
+  "repeat_class_SINE_bp_100kb"
+)
+for (col in expected_feature_cols) {
+  if (!col %in% names(analysis_dt)) {
+    analysis_dt[, (col) := 0]
+  }
+}
+
 decile_summary <- analysis_dt %>%
   .[
     ,
@@ -591,9 +940,16 @@ decile_summary <- analysis_dt %>%
       n_genes = .N,
       median_h2 = median(h2_GREML, na.rm = TRUE),
       prop_h2_sig = mean(Pval_GREML < 0.05, na.rm = TRUE),
+      median_enh_active_biosample_n = median(enh_link_active_biosample_n, na.rm = TRUE),
+      median_enh_mean_count_active = median(enh_link_mean_count_active, na.rm = TRUE),
+      median_enh_mean_bp_active = median(enh_link_mean_total_bp_active, na.rm = TRUE),
       median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
       median_open_100kb = median(open_count_100kb, na.rm = TRUE),
-      median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE)
+      median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE),
+      median_repeat_bp_100kb = median(repeat_bp_100kb, na.rm = TRUE),
+      median_repeat_active_class_n_100kb = median(repeat_active_class_n_100kb, na.rm = TRUE),
+      median_repeat_LINE_count_100kb = median(repeat_class_LINE_count_100kb, na.rm = TRUE),
+      median_repeat_SINE_count_100kb = median(repeat_class_SINE_count_100kb, na.rm = TRUE)
     ),
     by = post_mean_bin
   ] %>%
