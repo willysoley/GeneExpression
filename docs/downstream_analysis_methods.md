@@ -14,6 +14,7 @@ This note documents the data sources and analysis design used in:
 2. **UCSC RepeatMasker (`rmsk`)**
 - Standard genome-wide repeat annotation used in many repeat/transposon analyses.
 - Used here to compute repeat burden near gene TSS by total count and class-specific count.
+- Clarification: repeat features are defined as **counts of repeat intervals inside fixed windows around each gene TSS** (for example, +/-100 kb and +/-1 Mb), not whether the gene body itself overlaps a repeat.
 
 3. **GEUVADIS SDRF + TPM matrix**
 - European run filtering from SDRF, then keep genes with TPM > 0 in at least one European sample.
@@ -31,7 +32,8 @@ This note documents the data sources and analysis design used in:
 - This simple burden model is commonly used as a first-pass before more complex enhancer-gene linking frameworks (e.g., ABC maps).
 
 3. **Repeat classes**
-- Aggregate repeat overlap by `repClass` (LINE, SINE, LTR, DNA, etc.) and model class-specific associations with heritability.
+- Aggregate repeat counts by `repClass` (LINE, SINE, LTR, DNA, etc.) within TSS windows and model class-specific associations with heritability.
+- The analysis does **not** test a binary gene-body overlap with repeats.
 
 ## Primary sources / links
 
@@ -69,4 +71,3 @@ This note documents the data sources and analysis design used in:
 1. Replace default open-chromatin proxy (`GRCh38-cCREs.bed`) with **cell-type-specific ATAC/DNase narrowPeak BED** files and rerun the same counting/model code.
 2. Add distance-weighted burden instead of raw counts (e.g., weight by `1/(distance_to_TSS + 1)`).
 3. Swap proximity-based mapping with precomputed enhancer-gene links (ABC or SCREEN links) for a stricter assignment model.
-

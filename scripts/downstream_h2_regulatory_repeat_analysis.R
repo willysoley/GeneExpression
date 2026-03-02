@@ -541,6 +541,7 @@ rep_gr <- GRanges(
   milliDiv = rmsk$milliDiv
 )
 
+# Repeat features are window-based burdens near TSS, not gene-body overlap flags.
 repeat_features <- count_overlaps_dt(tss_win_small, rep_gr, "repeat_count_100kb") %>%
   merge(
     count_overlaps_dt(tss_win_cis, rep_gr, "repeat_count_1mb"),

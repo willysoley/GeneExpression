@@ -42,3 +42,5 @@ In `results/downstream_h2_regulatory_repeat/`:
 - `plots/regulatory_burden_vs_h2.pdf`
 - `plots/repeat_class_heatmap.pdf`
 
+Interpretation note:
+- `repeat_count_100kb`, `repeat_count_1mb`, and `repeat_class_*` are counts of repeat intervals within fixed TSS-centered windows, not indicators of whether the gene body overlaps repeats.
