@@ -22,7 +22,7 @@ cfg <- list(
   shet_xlsx = "/gpfs/data/mostafavilab/shared_data/gene_information/s_het_info.xlsx",
   shet_sheet = "Supplementary Table 1",
   tpm_tsv = "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_tpm.tsv",
-  gene_gtf = "/gpfs/data/mostafavilab/shared_data/annotations/gencode.v44.annotation.gtf.gz",
+  gene_gtf = "/gpfs/data/mostafavilab/shared_data/GENCODE_data/hg38/gencode.v48.annotation.gtf.gz",
   output_dir = "results/downstream_h2_regulatory_repeat",
   resource_dir = "resources/public_annotations",
   sdrf_url = "https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt",
@@ -46,6 +46,22 @@ stop_if_missing <- function(path, label) {
   if (!file.exists(path)) {
     stop(sprintf("Missing %s at: %s", label, path))
   }
+}
+
+resolve_first_existing <- function(paths, label) {
+  existing <- paths[file.exists(paths)]
+
+  if (length(existing) == 0L) {
+    stop(
+      sprintf(
+        "Missing %s. Tried:\\n- %s",
+        label,
+        paste(paths, collapse = "\\n- ")
+      )
+    )
+  }
+
+  existing[[1]]
 }
 
 strip_gene_version <- function(x) {
@@ -290,9 +306,18 @@ merged <- merged %>%
 
 # ----------------------- 3) GENE COORDINATES / WINDOWS ------------------------
 message("Step 4: load gene annotation and build TSS windows")
-stop_if_missing(cfg$gene_gtf, "gene annotation GTF")
 
-gtf <- import(cfg$gene_gtf)
+gtf_path <- resolve_first_existing(
+  unique(c(
+    cfg$gene_gtf,
+    "/gpfs/data/mostafavilab/shared_data/GENCODE_data/hg38/gencode.v48.annotation.gtf.gz",
+    "/gpfs/data/mostafavilab/shared_data/annotations/gencode.v44.annotation.gtf.gz"
+  )),
+  label = "gene annotation GTF"
+)
+message("Using gene annotation: ", gtf_path)
+
+gtf <- import(gtf_path)
 
 gene_gr <- gtf[gtf$type == "gene"] %>%
   keepStandardChromosomes(pruning.mode = "coarse") %>%
