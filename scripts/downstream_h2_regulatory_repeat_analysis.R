@@ -625,15 +625,29 @@ model_dt <- analysis_dt %>%
     .
   }
 
-lm_fit <- lm(
-  h2_GREML ~ scale(log1p(enh_count_100kb)) +
-    scale(log1p(open_count_100kb)) +
-    scale(log1p(repeat_count_100kb)) +
-    scale(log1p(mean_tpm)) +
-    scale(log1p(gene_length)) +
-    factor(post_mean_bin),
-  data = model_dt
+post_mean_term <- NULL
+post_mean_levels <- model_dt %>%
+  .[, uniqueN(post_mean_bin[!is.na(post_mean_bin)])]
+if (post_mean_levels >= 2L) {
+  post_mean_term <- "factor(post_mean_bin)"
+} else {
+  message("Skipping factor(post_mean_bin): fewer than 2 levels in model_dt.")
+}
+
+lm_terms <- c(
+  "scale(log1p(enh_count_100kb))",
+  "scale(log1p(open_count_100kb))",
+  "scale(log1p(repeat_count_100kb))",
+  "scale(log1p(mean_tpm))",
+  "scale(log1p(gene_length))",
+  post_mean_term
+) %>%
+  .[!is.na(.)]
+
+lm_formula <- as.formula(
+  paste("h2_GREML ~", paste(lm_terms, collapse = " + "))
 )
+lm_fit <- lm(lm_formula, data = model_dt)
 
 fwrite(
   as.data.table(tidy(lm_fit)),
@@ -641,16 +655,20 @@ fwrite(
   sep = "\t"
 )
 
-glm_fit <- glm(
-  h2_sig ~ scale(log1p(enh_count_100kb)) +
-    scale(log1p(open_count_100kb)) +
-    scale(log1p(repeat_count_100kb)) +
-    scale(log1p(mean_tpm)) +
-    scale(log1p(gene_length)) +
-    factor(post_mean_bin),
-  family = binomial(),
-  data = model_dt
+glm_terms <- c(
+  "scale(log1p(enh_count_100kb))",
+  "scale(log1p(open_count_100kb))",
+  "scale(log1p(repeat_count_100kb))",
+  "scale(log1p(mean_tpm))",
+  "scale(log1p(gene_length))",
+  post_mean_term
+) %>%
+  .[!is.na(.)]
+
+glm_formula <- as.formula(
+  paste("h2_sig ~", paste(glm_terms, collapse = " + "))
 )
+glm_fit <- glm(glm_formula, family = binomial(), data = model_dt)
 
 fwrite(
   as.data.table(tidy(glm_fit)),
@@ -662,23 +680,34 @@ repeat_cols <- names(model_dt) %>%
   str_subset("^repeat_class_")
 
 if (length(repeat_cols) > 0L) {
-  top_repeat_cols <- model_dt %>%
-    .[, lapply(.SD, sum, na.rm = TRUE), .SDcols = repeat_cols] %>%
-    melt(
-      measure.vars = names(.),
-      variable.name = "repeat_col",
-      value.name = "total"
-    ) %>%
+  repeat_stats <- data.table(repeat_col = repeat_cols) %>%
+    .[
+      ,
+      `:=`(
+        total = vapply(repeat_col, function(col) sum(model_dt[[col]], na.rm = TRUE), numeric(1)),
+        n_unique = vapply(
+          repeat_col,
+          function(col) uniqueN(model_dt[[col]][!is.na(model_dt[[col]])]),
+          integer(1)
+        )
+      )
+    ]
+
+  top_repeat_cols <- repeat_stats %>%
+    .[total > 0 & n_unique > 1] %>%
     .[order(-total)] %>%
     head(6) %>%
     .[, as.character(repeat_col)]
 
-  rhs <- c(
+  repeat_terms <- c(
     paste0("scale(log1p(", top_repeat_cols, "))"),
     "scale(log1p(mean_tpm))",
     "scale(log1p(gene_length))",
-    "factor(post_mean_bin)"
+    post_mean_term
   ) %>%
+    .[!is.na(.)]
+
+  rhs <- repeat_terms %>%
     paste(collapse = " + ")
 
   repeat_formula <- as.formula(paste("h2_GREML ~", rhs))
