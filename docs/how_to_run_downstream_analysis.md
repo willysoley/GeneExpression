@@ -13,9 +13,13 @@ Update at minimum:
 
 Optional overrides:
 - `cfg$enhancer_source` (`"roadmap_links"` or `"window_count"`)
+- `cfg$enhancer_fallback_source` (`"window_count"` or `"none"`)
 - `cfg$roadmap_links_dir` (local folder of Roadmap enhancer-gene link files)
 - `cfg$roadmap_links_url` (remote index URL if downloading)
+- `cfg$roadmap_links_urls` (ordered list of fallback index URLs)
+- `cfg$roadmap_links_zip_url` (Zenodo ZIP URL containing Roadmap links)
 - `cfg$roadmap_links_pattern` (regex for selecting Roadmap files)
+- `cfg$download_timeout_sec` (network timeout for downloads/index fetch)
 - `cfg$enhancer_bed` (cell-type-specific enhancer BED)
 - `cfg$open_bed` (cell-type-specific ATAC/DNase BED)
 - `cfg$repeat_rmsk` (local UCSC `rmsk.txt(.gz)`)
@@ -24,7 +28,12 @@ If optional paths are `NULL`, the script downloads defaults:
 - ENCODE SCREEN `GRCh38-cCREs.ELS.bed`
 - ENCODE SCREEN `GRCh38-cCREs.bed`
 - UCSC `hg38/database/rmsk.txt.gz`
-- Roadmap link files from `http://promoter.bx.psu.edu/hi-c/publication/data/Roadmap_links/` (if `enhancer_source = "roadmap_links"` and no local dir is provided)
+- Roadmap link files from ErnstLab index and/or Zenodo ZIP (if `enhancer_source = "roadmap_links"` and no local dir is provided)
+
+Timeout handling:
+- If Roadmap index/download fails, the script can automatically fall back to `window_count` mode when `cfg$enhancer_fallback_source = "window_count"`.
+- To force strict paper-mode only, set `cfg$enhancer_fallback_source = "none"`.
+- Recommended for HPC reproducibility: pre-download/extract Roadmap link files and set `cfg$roadmap_links_dir` to that local path.
 
 ## 2) Run
 

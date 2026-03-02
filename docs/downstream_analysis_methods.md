@@ -17,6 +17,7 @@ This note documents the data sources and analysis design used in:
   - count number of active biosamples with at least one linked enhancer
   - compute mean total linked enhancer length across active biosamples
 - This usually yields more realistic per-gene enhancer burden than naive fixed-window counting.
+- If network access to the Roadmap link host is unavailable, the pipeline can fall back to fixed-window enhancer counts (configurable).
 
 3. **UCSC RepeatMasker (`rmsk`)**
 - Standard genome-wide repeat annotation used in many repeat/transposon analyses.
@@ -66,7 +67,8 @@ This note documents the data sources and analysis design used in:
 - https://pmc.ncbi.nlm.nih.gov/articles/PMC5776756/
 
 6. Roadmap link files (Liu et al. resource used by Mostafavi et al.):
-- http://promoter.bx.psu.edu/hi-c/publication/data/Roadmap_links/
+- https://ernstlab.github.io/roadmaplinking/
+- https://zenodo.org/records/12042965
 
 7. UCSC Genome Browser downloads (hg38 database directory):
 - https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/

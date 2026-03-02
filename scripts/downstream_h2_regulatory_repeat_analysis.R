@@ -30,9 +30,17 @@ cfg <- list(
   tss_window_bp = 100000L,
   cis_window_bp = 1000000L,
   enhancer_source = "roadmap_links",  # options: "roadmap_links", "window_count"
+  enhancer_fallback_source = "window_count",  # options: "window_count", "none"
   roadmap_links_dir = NULL,           # optional local dir with Roadmap link files
-  roadmap_links_url = "http://promoter.bx.psu.edu/hi-c/publication/data/Roadmap_links/",
-  roadmap_links_pattern = "_15_coreMarks_hg38lift_domains_p_gt_0\\.5\\.txt$",
+  roadmap_links_url = "https://ernstlab.github.io/roadmaplinking/",
+  roadmap_links_urls = c(
+    "https://ernstlab.github.io/roadmaplinking/",
+    "https://promoter.bx.psu.edu/hi-c/publication/data/Roadmap_links/",
+    "http://promoter.bx.psu.edu/hi-c/publication/data/Roadmap_links/"
+  ),
+  roadmap_links_zip_url = "https://zenodo.org/records/12042965/files/RoadmapLinks.zip?download=1",
+  roadmap_links_pattern = "^links_.*_2\\.5\\.txt$",
+  download_timeout_sec = 300L,
   enhancer_bed = NULL,   # optional: use your own enhancer BED
   open_bed = NULL,       # optional: use your own ATAC/DNase/open BED
   repeat_rmsk = NULL     # optional: use your own UCSC rmsk.txt(.gz)
@@ -360,7 +368,8 @@ resolve_roadmap_link_files <- function(cfg) {
     local_files <- list.files(
       cfg$roadmap_links_dir,
       pattern = cfg$roadmap_links_pattern,
-      full.names = TRUE
+      full.names = TRUE,
+      recursive = TRUE
     )
     if (length(local_files) > 0L) {
       message("Using local Roadmap link files from: ", cfg$roadmap_links_dir)
@@ -371,40 +380,196 @@ resolve_roadmap_link_files <- function(cfg) {
   local_dir <- file.path(cfg$resource_dir, "Roadmap_links")
   dir.create(local_dir, recursive = TRUE, showWarnings = FALSE)
 
-  message("Fetching Roadmap links index: ", cfg$roadmap_links_url)
-  index_lines <- readLines(cfg$roadmap_links_url, warn = FALSE)
-
-  file_names <- index_lines %>%
-    str_match_all('href="([^"]+)"') %>%
-    .[[1]] %>%
-    .[, 2] %>%
-    basename() %>%
-    .[str_detect(., cfg$roadmap_links_pattern)] %>%
-    unique()
-
-  if (length(file_names) == 0L) {
-    stop("Could not find Roadmap link files from index: ", cfg$roadmap_links_url)
+  cached_files <- list.files(
+    local_dir,
+    pattern = cfg$roadmap_links_pattern,
+    full.names = TRUE,
+    recursive = TRUE
+  )
+  if (length(cached_files) > 0L) {
+    message("Using cached Roadmap link files in: ", local_dir)
+    return(cached_files)
   }
 
-  file_names %>%
-    lapply(function(fname) {
-      safe_download(
-        url = paste0(cfg$roadmap_links_url, fname),
-        dest_path = file.path(local_dir, fname)
+  index_urls <- unique(c(
+    cfg$roadmap_links_urls,
+    cfg$roadmap_links_url
+  ))
+
+  old_timeout <- getOption("timeout")
+  on.exit(options(timeout = old_timeout), add = TRUE)
+  options(timeout = max(as.integer(old_timeout), as.integer(cfg$download_timeout_sec)))
+
+  if (!is.null(cfg$roadmap_links_zip_url) && nzchar(cfg$roadmap_links_zip_url)) {
+    zip_path <- file.path(local_dir, "RoadmapLinks.zip")
+    unzip_dir <- file.path(local_dir, "RoadmapLinks_unzipped")
+    dir.create(unzip_dir, recursive = TRUE, showWarnings = FALSE)
+
+    zip_ok <- tryCatch(
+      {
+        safe_download(cfg$roadmap_links_zip_url, zip_path)
+        TRUE
+      },
+      error = function(e) {
+        message("Roadmap zip download failed: ", conditionMessage(e))
+        FALSE
+      }
+    )
+
+    if (zip_ok && file.exists(zip_path)) {
+      unzip_ok <- tryCatch(
+        {
+          suppressWarnings(unzip(zip_path, exdir = unzip_dir))
+          TRUE
+        },
+        error = function(e) {
+          message("Roadmap zip extraction failed: ", conditionMessage(e))
+          FALSE
+        }
       )
-    }) %>%
-    unlist()
+
+      if (unzip_ok) {
+        zip_files <- list.files(
+          unzip_dir,
+          pattern = cfg$roadmap_links_pattern,
+          full.names = TRUE,
+          recursive = TRUE
+        )
+        if (length(zip_files) > 0L) {
+          message("Using Roadmap link files from downloaded ZIP.")
+          return(zip_files)
+        }
+      }
+    }
+  }
+
+  for (idx_url in index_urls) {
+    message("Fetching Roadmap links index: ", idx_url)
+    index_lines <- tryCatch(
+      readLines(idx_url, warn = FALSE),
+      error = function(e) {
+        message("Roadmap index fetch failed for ", idx_url, ": ", conditionMessage(e))
+        NULL
+      }
+    )
+
+    if (is.null(index_lines)) {
+      next
+    }
+
+    file_names <- index_lines %>%
+      str_match_all('href="([^"]+)"') %>%
+      .[[1]] %>%
+      .[, 2] %>%
+      basename() %>%
+      .[str_detect(., cfg$roadmap_links_pattern)] %>%
+      unique()
+
+    if (length(file_names) == 0L) {
+      message("No matching Roadmap files found at index: ", idx_url)
+      next
+    }
+
+    downloaded <- file_names %>%
+      lapply(function(fname) {
+        remote <- paste0(idx_url, fname)
+        tryCatch(
+          safe_download(
+            url = remote,
+            dest_path = file.path(local_dir, fname)
+          ),
+          error = function(e) {
+            message("Roadmap file download failed for ", fname, ": ", conditionMessage(e))
+            NULL
+          }
+        )
+      }) %>%
+      unlist()
+
+    downloaded <- downloaded[!is.na(downloaded) & file.exists(downloaded)]
+    if (length(downloaded) > 0L) {
+      return(downloaded)
+    }
+  }
+
+  stop(
+    paste0(
+      "Could not obtain Roadmap link files. ",
+      "Set cfg$roadmap_links_dir to a local directory containing files matching pattern ",
+      cfg$roadmap_links_pattern,
+      ", or use cfg$enhancer_source = 'window_count'."
+    )
+  )
 }
 
-summarize_roadmap_link_file <- function(path, gene_lookup_dt) {
+extract_biosample_id <- function(path) {
+  fname <- basename(path)
+  b <- str_extract(fname, "E\\d{3}")
+  if (is.na(b)) {
+    b <- fname
+  }
+  b
+}
+
+extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) {
+  biosample <- extract_biosample_id(path)
+  raw_dt <- fread(path, sep = "\t", header = FALSE, fill = TRUE, showProgress = FALSE)
+  if (nrow(raw_dt) == 0L || ncol(raw_dt) < 4L) {
+    return(data.table(
+      gene_id_clean = character(0),
+      biosample = character(0),
+      chr = character(0),
+      start = numeric(0),
+      end = numeric(0),
+      enhancer_len = numeric(0)
+    ))
+  }
+
+  chr_ratio <- mean(is_chr_like(raw_dt[[1]]), na.rm = TRUE)
+  ensg_ratio <- mean(grepl("^ENSG", as.character(raw_dt[[4]])), na.rm = TRUE)
+
+  if (is.finite(chr_ratio) && is.finite(ensg_ratio) && chr_ratio > 0.6 && ensg_ratio > 0.5) {
+    link_dt <- data.table(
+      chr = normalize_chr(raw_dt[[1]]),
+      start = suppressWarnings(as.numeric(raw_dt[[2]])),
+      end = suppressWarnings(as.numeric(raw_dt[[3]])),
+      gene_id_clean = strip_gene_version(as.character(raw_dt[[4]]))
+    ) %>%
+      .[
+        chr %in% standard_chr &
+          is.finite(start) &
+          is.finite(end) &
+          end > start &
+          !is.na(gene_id_clean) &
+          gene_id_clean != ""
+      ] %>%
+      merge(gene_lookup_id_dt, by = "gene_id_clean", all = FALSE) %>%
+      .[
+        ,
+        `:=`(
+          biosample = biosample,
+          enhancer_len = end - start
+        )
+      ]
+
+    return(link_dt[, .(gene_id_clean, biosample, chr, start, end, enhancer_len)])
+  }
+
   dt <- fread(path, sep = "\t", header = TRUE, fill = TRUE, showProgress = FALSE)
   names(dt) <- make.names(names(dt), unique = TRUE)
 
-  gene_col <- intersect(c("targetGene", "target.gene", "TargetGene"), names(dt))[1]
+  gene_col <- intersect(c("targetGene", "target.gene", "TargetGene", "gene", "Gene", "ensg", "gene_id"), names(dt))[1]
   start_col <- intersect(c("start", "Start"), names(dt))[1]
   end_col <- intersect(c("end", "End"), names(dt))[1]
   if (is.na(gene_col) || is.na(start_col) || is.na(end_col)) {
-    stop("Roadmap link file missing one of {targetGene,start,end}: ", path)
+    return(data.table(
+      gene_id_clean = character(0),
+      biosample = character(0),
+      chr = character(0),
+      start = numeric(0),
+      end = numeric(0),
+      enhancer_len = numeric(0)
+    ))
   }
 
   chr_col <- intersect(c("chr", "chrom", "chromosome", "X", "V1"), names(dt))[1]
@@ -413,64 +578,69 @@ summarize_roadmap_link_file <- function(path, gene_lookup_dt) {
   } else {
     idx <- detect_chr_col(dt)
     if (is.na(idx)) {
-      stop("Could not detect chromosome column in Roadmap file: ", path)
+      return(data.table(
+        gene_id_clean = character(0),
+        biosample = character(0),
+        chr = character(0),
+        start = numeric(0),
+        end = numeric(0),
+        enhancer_len = numeric(0)
+      ))
     }
     dt[[idx]]
   }
+
+  gene_raw <- as.character(dt[[gene_col]])
+  gene_is_ensg <- mean(grepl("^ENSG", gene_raw), na.rm = TRUE) > 0.5
 
   link_dt <- data.table(
     chr = normalize_chr(chr_raw),
     start = suppressWarnings(as.numeric(dt[[start_col]])),
     end = suppressWarnings(as.numeric(dt[[end_col]])),
-    gene_name = as.character(dt[[gene_col]])
+    gene_raw = gene_raw
   ) %>%
     .[
       chr %in% standard_chr &
         is.finite(start) &
         is.finite(end) &
         end > start &
-        !is.na(gene_name) &
-        gene_name != ""
+        !is.na(gene_raw) &
+        gene_raw != ""
     ] %>%
     .[
       ,
       enhancer_len := end - start
-    ] %>%
-    unique(by = c("chr", "start", "end", "gene_name")) %>%
-    merge(gene_lookup_dt, by = "gene_name", all = FALSE)
+    ]
 
-  if (nrow(link_dt) == 0L) {
-    return(data.table(
-      gene_id_clean = character(0),
-      biosample = character(0),
-      enh_link_n = numeric(0),
-      enh_link_total_bp = numeric(0)
-    ))
-  }
-
-  biosample <- basename(path) %>%
-    str_extract("^E\\d+")
-  if (is.na(biosample)) {
-    biosample <- basename(path)
+  if (gene_is_ensg) {
+    link_dt <- link_dt %>%
+      .[
+        ,
+        gene_id_clean := strip_gene_version(gene_raw)
+      ] %>%
+      merge(gene_lookup_id_dt, by = "gene_id_clean", all = FALSE)
+  } else {
+    link_dt <- link_dt %>%
+      .[
+        ,
+        gene_name := gene_raw
+      ] %>%
+      merge(gene_lookup_name_dt, by = "gene_name", all = FALSE)
   }
 
   link_dt %>%
     .[
       ,
-      .(
-        enh_link_n = .N,
-        enh_link_total_bp = sum(enhancer_len)
-      ),
-      by = gene_id_clean
+      biosample := biosample
     ] %>%
     .[
       ,
-      biosample := biosample
+      .(gene_id_clean, biosample, chr, start, end, enhancer_len)
     ]
 }
 
 build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
-  gene_lookup_dt <- gene_tbl %>%
+  gene_lookup_name_dt <- gene_tbl %>%
     .[
       !is.na(gene_name) & gene_name != "",
       .(gene_name, gene_id_clean)
@@ -487,22 +657,32 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
       n_gene_ids == 1,
       .(gene_name, gene_id_clean)
     ]
+  gene_lookup_id_dt <- gene_tbl %>%
+    .[
+      !is.na(gene_id_clean) & gene_id_clean != "",
+      .(gene_id_clean)
+    ] %>%
+    unique()
 
-  if (nrow(gene_lookup_dt) == 0L) {
-    stop("No gene_name to gene_id mapping available for Roadmap enhancer links.")
+  if (nrow(gene_lookup_id_dt) == 0L) {
+    stop("No gene_id mapping available for Roadmap enhancer links.")
   }
 
-  per_biosample <- roadmap_files %>%
+  per_link <- roadmap_files %>%
     lapply(function(f) {
       message("Reading Roadmap links: ", basename(f))
-      summarize_roadmap_link_file(f, gene_lookup_dt = gene_lookup_dt)
+      extract_roadmap_links(
+        path = f,
+        gene_lookup_name_dt = gene_lookup_name_dt,
+        gene_lookup_id_dt = gene_lookup_id_dt
+      )
     }) %>%
     rbindlist(fill = TRUE)
 
   out <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
     unique(by = "gene_id_clean")
 
-  if (nrow(per_biosample) == 0L) {
+  if (nrow(per_link) == 0L) {
     out[, `:=`(
       enh_link_active_biosample_n = 0,
       enh_link_mean_count_active = 0,
@@ -510,6 +690,17 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
     )]
     return(out)
   }
+
+  per_biosample <- per_link %>%
+    unique(by = c("gene_id_clean", "biosample", "chr", "start", "end")) %>%
+    .[
+      ,
+      .(
+        enh_link_n = .N,
+        enh_link_total_bp = sum(enhancer_len)
+      ),
+      by = .(gene_id_clean, biosample)
+    ]
 
   summary_dt <- per_biosample %>%
     .[
@@ -535,6 +726,27 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
         enh_link_mean_total_bp_active = fifelse(is.na(enh_link_mean_total_bp_active), 0, enh_link_mean_total_bp_active)
       )
     ]
+}
+
+build_window_enhancer_features <- function(cfg, tss_win_small, tss_win_cis) {
+  enhancer_path <- cfg$enhancer_bed
+  if (is.null(enhancer_path) || enhancer_path == "") {
+    enhancer_path <- safe_download(
+      defaults$enhancer_url,
+      file.path(cfg$resource_dir, basename(defaults$enhancer_url))
+    )
+  }
+
+  enh_gr <- import_bed_like(enhancer_path, label = "enhancer annotations") %>%
+    to_ucsc_style() %>%
+    keep_standard_chr()
+
+  count_overlaps_dt(tss_win_small, enh_gr, "enh_count_100kb") %>%
+    merge(
+      count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_1mb"),
+      by = "gene_id_clean",
+      all = TRUE
+    )
 }
 
 build_log_terms <- function(dt, columns) {
@@ -728,37 +940,30 @@ reg_features <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
 
 if (identical(cfg$enhancer_source, "roadmap_links")) {
   message("Enhancer mode: Roadmap enhancer-gene links (paper-style).")
-  roadmap_files <- resolve_roadmap_link_files(cfg)
-  message("Roadmap biosample files found: ", length(roadmap_files))
-
-  enh_features <- build_roadmap_enhancer_features(
-    roadmap_files = roadmap_files,
-    gene_tbl = gene_tbl
+  enh_features <- tryCatch(
+    {
+      roadmap_files <- resolve_roadmap_link_files(cfg)
+      message("Roadmap biosample files found: ", length(roadmap_files))
+      build_roadmap_enhancer_features(
+        roadmap_files = roadmap_files,
+        gene_tbl = gene_tbl
+      )
+    },
+    error = function(e) {
+      message("Roadmap enhancer mode failed: ", conditionMessage(e))
+      if (identical(cfg$enhancer_fallback_source, "window_count")) {
+        message("Falling back to enhancer window-count mode.")
+        return(build_window_enhancer_features(cfg, tss_win_small, tss_win_cis))
+      }
+      stop(e)
+    }
   )
 
   reg_features <- reg_features %>%
     merge(enh_features, by = "gene_id_clean", all.x = TRUE)
 } else if (identical(cfg$enhancer_source, "window_count")) {
   message("Enhancer mode: fixed-window BED overlap counts.")
-
-  enhancer_path <- cfg$enhancer_bed
-  if (is.null(enhancer_path) || enhancer_path == "") {
-    enhancer_path <- safe_download(
-      defaults$enhancer_url,
-      file.path(cfg$resource_dir, basename(defaults$enhancer_url))
-    )
-  }
-
-  enh_gr <- import_bed_like(enhancer_path, label = "enhancer annotations") %>%
-    to_ucsc_style() %>%
-    keep_standard_chr()
-
-  enh_count_features <- count_overlaps_dt(tss_win_small, enh_gr, "enh_count_100kb") %>%
-    merge(
-      count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_1mb"),
-      by = "gene_id_clean",
-      all = TRUE
-    )
+  enh_count_features <- build_window_enhancer_features(cfg, tss_win_small, tss_win_cis)
 
   reg_features <- reg_features %>%
     merge(enh_count_features, by = "gene_id_clean", all.x = TRUE)
