@@ -475,7 +475,18 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
       !is.na(gene_name) & gene_name != "",
       .(gene_name, gene_id_clean)
     ] %>%
-    unique(by = c("gene_name", "gene_id_clean"))
+    .[
+      ,
+      .(
+        n_gene_ids = uniqueN(gene_id_clean),
+        gene_id_clean = first(gene_id_clean)
+      ),
+      by = gene_name
+    ] %>%
+    .[
+      n_gene_ids == 1,
+      .(gene_name, gene_id_clean)
+    ]
 
   if (nrow(gene_lookup_dt) == 0L) {
     stop("No gene_name to gene_id mapping available for Roadmap enhancer links.")
@@ -959,12 +970,20 @@ fwrite(decile_summary, file.path(cfg$output_dir, "decile_feature_summary.tsv"), 
 
 cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$h2_GREML, "post_mean", "h2_GREML"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_active_biosample_n, "post_mean", "enh_link_active_biosample_n"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_mean_total_bp_active, "post_mean", "enh_link_mean_total_bp_active"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_count_100kb, "post_mean", "enh_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$open_count_100kb, "post_mean", "open_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_count_100kb, "post_mean", "repeat_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_LINE_count_100kb, "post_mean", "repeat_class_LINE_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_SINE_count_100kb, "post_mean", "repeat_class_SINE_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_active_biosample_n, "h2_GREML", "enh_link_active_biosample_n"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_mean_total_bp_active, "h2_GREML", "enh_link_mean_total_bp_active"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_count_100kb, "h2_GREML", "enh_count_100kb"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$open_count_100kb, "h2_GREML", "open_count_100kb"),
-  safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_count_100kb, "h2_GREML", "repeat_count_100kb")
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_count_100kb, "h2_GREML", "repeat_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_class_LINE_count_100kb, "h2_GREML", "repeat_class_LINE_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_class_SINE_count_100kb, "h2_GREML", "repeat_class_SINE_count_100kb")
 ))
 
 fwrite(cor_dt, file.path(cfg$output_dir, "spearman_correlations.tsv"), sep = "\t")
@@ -991,15 +1010,28 @@ if (post_mean_levels >= 2L) {
   message("Skipping factor(post_mean_bin): fewer than 2 levels in model_dt.")
 }
 
+primary_numeric_cols <- c(
+  "enh_link_active_biosample_n",
+  "enh_link_mean_total_bp_active",
+  "enh_count_100kb",
+  "open_count_100kb",
+  "repeat_count_100kb",
+  "repeat_class_LINE_count_100kb",
+  "repeat_class_SINE_count_100kb",
+  "mean_tpm",
+  "gene_length"
+)
+
+numeric_terms <- build_log_terms(model_dt, primary_numeric_cols)
+if (length(numeric_terms) == 0L) {
+  stop("No variable numeric predictors available for lm/glm models.")
+}
+
 lm_terms <- c(
-  "scale(log1p(enh_count_100kb))",
-  "scale(log1p(open_count_100kb))",
-  "scale(log1p(repeat_count_100kb))",
-  "scale(log1p(mean_tpm))",
-  "scale(log1p(gene_length))",
+  numeric_terms,
   post_mean_term
 ) %>%
-  .[!is.na(.)]
+  .[!is.na(.) & nzchar(.)]
 
 lm_formula <- as.formula(
   paste("h2_GREML ~", paste(lm_terms, collapse = " + "))
@@ -1013,14 +1045,10 @@ fwrite(
 )
 
 glm_terms <- c(
-  "scale(log1p(enh_count_100kb))",
-  "scale(log1p(open_count_100kb))",
-  "scale(log1p(repeat_count_100kb))",
-  "scale(log1p(mean_tpm))",
-  "scale(log1p(gene_length))",
+  numeric_terms,
   post_mean_term
 ) %>%
-  .[!is.na(.)]
+  .[!is.na(.) & nzchar(.)]
 
 glm_formula <- as.formula(
   paste("h2_sig ~", paste(glm_terms, collapse = " + "))
@@ -1034,7 +1062,7 @@ fwrite(
 )
 
 repeat_cols <- names(model_dt) %>%
-  str_subset("^repeat_class_")
+  str_subset("^repeat_class_.*_count_100kb$")
 
 if (length(repeat_cols) > 0L) {
   repeat_stats <- data.table(repeat_col = repeat_cols) %>%
@@ -1106,39 +1134,49 @@ ggsave(
   height = 5
 )
 
-p_reg <- analysis_dt %>%
-  as_tibble() %>%
-  select(h2_GREML, enh_count_100kb, open_count_100kb) %>%
-  pivot_longer(
-    cols = c(enh_count_100kb, open_count_100kb),
-    names_to = "feature",
-    values_to = "count"
-  ) %>%
-  ggplot(aes(x = log1p(count), y = h2_GREML)) +
-  geom_point(alpha = 0.15, size = 0.8, color = "gray35") +
-  geom_smooth(
-    method = "gam",
-    color = "#e07a5f",
-    fill = "#e07a5f",
-    alpha = 0.2
-  ) +
-  facet_wrap(~feature, scales = "free_x") +
-  labs(
-    title = "Regulatory feature burden vs heritability",
-    x = "log1p(feature count within +/-100 kb)",
-    y = "h2_GREML"
-  ) +
-  theme_minimal(base_size = 12)
+reg_plot_cols <- c(
+  "enh_link_active_biosample_n",
+  "enh_link_mean_count_active",
+  "enh_count_100kb",
+  "open_count_100kb"
+) %>%
+  .[. %in% names(analysis_dt)]
 
-ggsave(
-  filename = file.path(cfg$output_dir, "plots", "regulatory_burden_vs_h2.pdf"),
-  plot = p_reg,
-  width = 10,
-  height = 5.5
-)
+if (length(reg_plot_cols) > 0L) {
+  p_reg <- analysis_dt %>%
+    as_tibble() %>%
+    select(h2_GREML, all_of(reg_plot_cols)) %>%
+    pivot_longer(
+      cols = all_of(reg_plot_cols),
+      names_to = "feature",
+      values_to = "value"
+    ) %>%
+    ggplot(aes(x = log1p(value), y = h2_GREML)) +
+    geom_point(alpha = 0.15, size = 0.8, color = "gray35") +
+    geom_smooth(
+      method = "gam",
+      color = "#e07a5f",
+      fill = "#e07a5f",
+      alpha = 0.2
+    ) +
+    facet_wrap(~feature, scales = "free_x") +
+    labs(
+      title = "Regulatory feature burden vs heritability",
+      x = "log1p(feature value)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 12)
+
+  ggsave(
+    filename = file.path(cfg$output_dir, "plots", "regulatory_burden_vs_h2.pdf"),
+    plot = p_reg,
+    width = 10,
+    height = 5.5
+  )
+}
 
 repeat_class_cols <- names(analysis_dt) %>%
-  str_subset("^repeat_class_")
+  str_subset("^repeat_class_.*_count_100kb$")
 
 if (length(repeat_class_cols) > 0L) {
   repeat_heat <- analysis_dt %>%
