@@ -1,0 +1,473 @@
+#!/usr/bin/env Rscript
+
+suppressPackageStartupMessages({
+  library(data.table)
+  library(dplyr)
+  library(stringr)
+  library(readxl)
+  library(GenomicRanges)
+  library(IRanges)
+  library(GenomeInfoDb)
+  library(rtracklayer)
+  library(ggplot2)
+  library(tidyr)
+  library(broom)
+})
+
+# ------------------------------ USER CONFIG -----------------------------------
+# Edit these paths for your environment before running.
+cfg <- list(
+  summary_tsv = "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260112_GREML_Nextflow_v2/results/summary/final_heritability_summary.tsv",
+  shet_xlsx = "/gpfs/data/mostafavilab/shared_data/gene_information/s_het_info.xlsx",
+  shet_sheet = "Supplementary Table 1",
+  tpm_tsv = "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_tpm.tsv",
+  gene_gtf = "/gpfs/data/mostafavilab/shared_data/annotations/gencode.v44.annotation.gtf.gz",
+  output_dir = "results/downstream_h2_regulatory_repeat",
+  resource_dir = "resources/public_annotations",
+  sdrf_url = "https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt",
+  eur_pops = c("British", "Finnish", "Tuscan", "Utah"),
+  tss_window_bp = 100000L,
+  cis_window_bp = 1000000L,
+  enhancer_bed = NULL,   # optional: use your own enhancer BED
+  open_bed = NULL,       # optional: use your own ATAC/DNase/open BED
+  repeat_rmsk = NULL     # optional: use your own UCSC rmsk.txt(.gz)
+)
+
+# Defaults are widely used public resources.
+defaults <- list(
+  enhancer_url = "https://downloads.wenglab.org/Registry-V4/GRCh38-cCREs.ELS.bed",
+  open_url = "https://downloads.wenglab.org/Registry-V4/GRCh38-cCREs.bed",
+  rmsk_url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/rmsk.txt.gz"
+)
+
+# ------------------------------ HELPERS ---------------------------------------
+stop_if_missing <- function(path, label) {
+  if (!file.exists(path)) {
+    stop(sprintf("Missing %s at: %s", label, path))
+  }
+}
+
+strip_gene_version <- function(x) {
+  str_replace(x, "\\..*$", "")
+}
+
+safe_download <- function(url, dest_path) {
+  if (file.exists(dest_path)) {
+    message("Using existing: ", dest_path)
+    return(dest_path)
+  }
+  dir.create(dirname(dest_path), recursive = TRUE, showWarnings = FALSE)
+  message("Downloading: ", url)
+  download.file(url = url, destfile = dest_path, mode = "wb", quiet = FALSE)
+  dest_path
+}
+
+to_ucsc_style <- function(gr) {
+  out <- gr
+  if (!any(startsWith(as.character(seqnames(out)), "chr"))) {
+    seqlevels(out) <- ifelse(startsWith(seqlevels(out), "chr"), seqlevels(out), paste0("chr", seqlevels(out)))
+  }
+  out
+}
+
+symm_window <- function(gr_tss, flank_bp) {
+  starts <- pmax(1L, start(gr_tss) - flank_bp)
+  ends <- end(gr_tss) + flank_bp
+  GRanges(
+    seqnames = seqnames(gr_tss),
+    ranges = IRanges(start = starts, end = ends),
+    strand = "*",
+    gene_id_clean = mcols(gr_tss)$gene_id_clean
+  )
+}
+
+safe_spearman <- function(x, y, label_x, label_y) {
+  ok <- is.finite(x) & is.finite(y)
+  if (sum(ok) < 5) {
+    return(data.table(
+      x = label_x, y = label_y, estimate = NA_real_, p_value = NA_real_, n = sum(ok)
+    ))
+  }
+  test <- suppressWarnings(cor.test(x[ok], y[ok], method = "spearman"))
+  data.table(
+    x = label_x,
+    y = label_y,
+    estimate = unname(test$estimate),
+    p_value = test$p.value,
+    n = sum(ok)
+  )
+}
+
+count_by_group <- function(window_gr, feature_gr, feature_class, prefix) {
+  class_levels <- sort(unique(feature_class))
+  class_levels <- class_levels[!is.na(class_levels) & class_levels != ""]
+  out <- data.table(gene_id_clean = mcols(window_gr)$gene_id_clean)
+  for (cls in class_levels) {
+    idx <- which(feature_class == cls)
+    if (length(idx) == 0L) {
+      next
+    }
+    cls_clean <- gsub("[^A-Za-z0-9]+", "_", cls)
+    nm <- sprintf("%s_%s", prefix, cls_clean)
+    out[[nm]] <- countOverlaps(window_gr, feature_gr[idx], ignore.strand = TRUE)
+  }
+  out
+}
+
+# --------------------------- PREP OUTPUT DIRS ---------------------------------
+dir.create(cfg$output_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(cfg$resource_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(file.path(cfg$output_dir, "plots"), recursive = TRUE, showWarnings = FALSE)
+
+# ---------------------- 1) EUROPEAN NON-ZERO FILTER ---------------------------
+message("Step 1: load SDRF and filter GEUVADIS European runs")
+sdrf <- fread(cfg$sdrf_url)
+names(sdrf) <- make.unique(names(sdrf))
+
+ancestry_col <- "Characteristics[ancestry category]"
+run_col <- "Comment[ENA_RUN]"
+if (!ancestry_col %in% names(sdrf)) stop("Missing ancestry column in SDRF.")
+if (!run_col %in% names(sdrf)) stop("Missing ENA run column in SDRF.")
+
+eur_runs <- sdrf %>%
+  filter(.data[[ancestry_col]] %in% cfg$eur_pops) %>%
+  pull(.data[[run_col]]) %>%
+  unique()
+
+if (length(eur_runs) == 0L) {
+  stop("No European runs found in SDRF with the configured population labels.")
+}
+
+message("Step 2: load TPM and keep genes with TPM > 0 in at least one EU sample")
+stop_if_missing(cfg$tpm_tsv, "TPM matrix")
+tpm <- fread(cfg$tpm_tsv)
+
+gene_col <- intersect(c("gene_id", "Gene", "feature_id", "gene"), names(tpm))[1]
+if (is.na(gene_col)) {
+  stop("Could not find gene id column in TPM matrix.")
+}
+
+all_cols <- names(tpm)
+clean_cols <- str_remove(all_cols, "_\\d+$")
+
+sample_keep <- clean_cols %in% eur_runs
+sample_keep[which(all_cols == gene_col)] <- TRUE
+keep_cols <- all_cols[sample_keep]
+tpm_eur <- tpm[, ..keep_cols]
+
+eur_sample_cols <- setdiff(names(tpm_eur), gene_col)
+if (length(eur_sample_cols) == 0L) {
+  stop("No European sample columns matched TPM columns after cleaning suffixes.")
+}
+
+tpm_eur[, (eur_sample_cols) := lapply(.SD, as.numeric), .SDcols = eur_sample_cols]
+eur_matrix <- as.matrix(tpm_eur[, ..eur_sample_cols])
+keep_rows <- rowSums(eur_matrix > 0, na.rm = TRUE) > 0
+tpm_eur <- tpm_eur[keep_rows]
+tpm_eur[, gene_id_clean := strip_gene_version(get(gene_col))]
+tpm_eur[, mean_tpm := rowMeans(as.matrix(.SD), na.rm = TRUE), .SDcols = eur_sample_cols]
+
+expressing_gene_ids <- unique(tpm_eur$gene_id_clean)
+writeLines(expressing_gene_ids, con = file.path(cfg$output_dir, "non_zero_eur_gene_ids.txt"))
+
+fwrite(
+  data.table(
+    metric = c("original_genes", "eur_nonzero_genes"),
+    value = c(nrow(tpm), nrow(tpm_eur))
+  ),
+  file.path(cfg$output_dir, "expression_filter_counts.tsv"),
+  sep = "\t"
+)
+
+# ----------------------- 2) HERITABILITY + S_HET TABLE ------------------------
+message("Step 3: merge heritability summary and s_het")
+stop_if_missing(cfg$summary_tsv, "heritability summary TSV")
+stop_if_missing(cfg$shet_xlsx, "s_het xlsx")
+
+sum_dt <- fread(cfg$summary_tsv) %>%
+  as.data.table() %>%
+  .[, .(Gene, h2_GREML, SE_GREML, Pval_GREML)]
+sum_dt[, gene_id_clean := strip_gene_version(Gene)]
+
+shet_dt <- read_xlsx(cfg$shet_xlsx, sheet = cfg$shet_sheet) %>% as.data.table()
+if (!"ensg" %in% names(shet_dt) || !"post_mean" %in% names(shet_dt)) {
+  stop("s_het sheet must include columns named 'ensg' and 'post_mean'.")
+}
+shet_dt[, gene_id_clean := strip_gene_version(ensg)]
+
+merged <- merge(sum_dt, shet_dt[, .(gene_id_clean, post_mean)], by = "gene_id_clean", all.x = TRUE)
+merged <- merged[!is.na(post_mean) & gene_id_clean %in% expressing_gene_ids]
+merged[, post_mean_bin := dplyr::ntile(post_mean, 10L)]
+if (nrow(merged) == 0L) {
+  stop("No genes left after merging h2 + s_het and applying EU non-zero filter.")
+}
+
+tpm_means <- unique(tpm_eur[, .(gene_id_clean, mean_tpm)])
+merged <- merge(merged, tpm_means, by = "gene_id_clean", all.x = TRUE)
+
+# ----------------------- 3) GENE COORDINATES / WINDOWS ------------------------
+message("Step 4: load gene annotation and build TSS windows")
+stop_if_missing(cfg$gene_gtf, "gene annotation GTF")
+gtf <- import(cfg$gene_gtf)
+gene_gr <- gtf[gtf$type == "gene"]
+
+gene_gr <- keepStandardChromosomes(gene_gr, pruning.mode = "coarse")
+gene_gr <- to_ucsc_style(gene_gr)
+
+gene_ids <- strip_gene_version(mcols(gene_gr)$gene_id)
+gene_names <- if ("gene_name" %in% colnames(mcols(gene_gr))) mcols(gene_gr)$gene_name else gene_ids
+gene_len <- width(gene_gr)
+
+gene_tbl <- data.table(
+  gene_id_clean = gene_ids,
+  chr = as.character(seqnames(gene_gr)),
+  start = start(gene_gr),
+  end = end(gene_gr),
+  strand = as.character(strand(gene_gr)),
+  gene_name = as.character(gene_names),
+  gene_length = gene_len
+)
+
+gene_tbl <- gene_tbl[!duplicated(gene_id_clean)]
+gene_tbl <- gene_tbl[gene_id_clean %in% merged$gene_id_clean]
+if (nrow(gene_tbl) == 0L) {
+  stop("No gene coordinates matched merged gene IDs. Check gene ID format and GTF build.")
+}
+
+tss_pos <- ifelse(gene_tbl$strand == "-", gene_tbl$end, gene_tbl$start)
+tss_gr <- GRanges(
+  seqnames = gene_tbl$chr,
+  ranges = IRanges(start = tss_pos, end = tss_pos),
+  strand = "*",
+  gene_id_clean = gene_tbl$gene_id_clean
+)
+tss_win_small <- symm_window(tss_gr, cfg$tss_window_bp)
+tss_win_cis <- symm_window(tss_gr, cfg$cis_window_bp)
+
+# ----------------------- 4) REGULATORY FEATURE COUNTS -------------------------
+message("Step 5: load enhancer/open annotations and count overlaps")
+
+enhancer_path <- cfg$enhancer_bed
+if (is.null(enhancer_path) || enhancer_path == "") {
+  enhancer_path <- safe_download(defaults$enhancer_url, file.path(cfg$resource_dir, basename(defaults$enhancer_url)))
+}
+open_path <- cfg$open_bed
+if (is.null(open_path) || open_path == "") {
+  open_path <- safe_download(defaults$open_url, file.path(cfg$resource_dir, basename(defaults$open_url)))
+}
+
+enh_gr <- import(enhancer_path, format = "BED")
+open_gr <- import(open_path, format = "BED")
+
+enh_gr <- keepStandardChromosomes(to_ucsc_style(enh_gr), pruning.mode = "coarse")
+open_gr <- keepStandardChromosomes(to_ucsc_style(open_gr), pruning.mode = "coarse")
+
+reg_features <- data.table(gene_id_clean = mcols(tss_gr)$gene_id_clean)
+reg_features[, enh_count_100kb := countOverlaps(tss_win_small, enh_gr, ignore.strand = TRUE)]
+reg_features[, enh_count_1mb := countOverlaps(tss_win_cis, enh_gr, ignore.strand = TRUE)]
+reg_features[, open_count_100kb := countOverlaps(tss_win_small, open_gr, ignore.strand = TRUE)]
+reg_features[, open_count_1mb := countOverlaps(tss_win_cis, open_gr, ignore.strand = TRUE)]
+
+# ------------------------ 5) UCSC REPEATMASKER COUNTS -------------------------
+message("Step 6: load UCSC RepeatMasker annotations and summarize repeats")
+rmsk_path <- cfg$repeat_rmsk
+if (is.null(rmsk_path) || rmsk_path == "") {
+  rmsk_path <- safe_download(defaults$rmsk_url, file.path(cfg$resource_dir, basename(defaults$rmsk_url)))
+}
+
+rmsk <- fread(rmsk_path, sep = "\t", header = FALSE, showProgress = TRUE)
+if (ncol(rmsk) < 17L) {
+  stop("Unexpected rmsk format. Expected at least 17 columns.")
+}
+
+setnames(
+  rmsk,
+  old = names(rmsk)[1:17],
+  new = c(
+    "bin", "swScore", "milliDiv", "milliDel", "milliIns", "genoName", "genoStart",
+    "genoEnd", "genoLeft", "strand", "repName", "repClass", "repFamily",
+    "repStart", "repEnd", "repLeft", "id"
+  )
+)
+
+rmsk <- rmsk[
+  genoName %in% paste0("chr", c(1:22, "X", "Y")) &
+    !is.na(repClass) &
+    genoEnd > genoStart
+]
+
+rep_gr <- GRanges(
+  seqnames = rmsk$genoName,
+  ranges = IRanges(start = rmsk$genoStart + 1L, end = rmsk$genoEnd),
+  strand = "*",
+  repName = rmsk$repName,
+  repClass = rmsk$repClass,
+  repFamily = rmsk$repFamily,
+  milliDiv = rmsk$milliDiv
+)
+
+repeat_features <- data.table(gene_id_clean = mcols(tss_gr)$gene_id_clean)
+repeat_features[, repeat_count_100kb := countOverlaps(tss_win_small, rep_gr, ignore.strand = TRUE)]
+repeat_features[, repeat_count_1mb := countOverlaps(tss_win_cis, rep_gr, ignore.strand = TRUE)]
+
+# Class-level repeat counts in +/-100 kb window.
+repeat_class_dt <- count_by_group(
+  window_gr = tss_win_small,
+  feature_gr = rep_gr,
+  feature_class = mcols(rep_gr)$repClass,
+  prefix = "repeat_class"
+)
+
+# --------------------------- 6) FINAL ANALYSIS TABLE --------------------------
+analysis_dt <- merged %>%
+  as.data.table() %>%
+  merge(gene_tbl[, .(gene_id_clean, gene_name, chr, start, end, gene_length)], by = "gene_id_clean", all.x = TRUE) %>%
+  merge(reg_features, by = "gene_id_clean", all.x = TRUE) %>%
+  merge(repeat_features, by = "gene_id_clean", all.x = TRUE) %>%
+  merge(repeat_class_dt, by = "gene_id_clean", all.x = TRUE)
+
+for (col in names(analysis_dt)) {
+  if (startsWith(col, "enh_count_") || startsWith(col, "open_count_") || startsWith(col, "repeat_count_") || startsWith(col, "repeat_class_")) {
+    set(analysis_dt, which(is.na(analysis_dt[[col]])), col, 0L)
+  }
+}
+
+fwrite(analysis_dt, file.path(cfg$output_dir, "gene_level_features.tsv"), sep = "\t")
+
+# ----------------------------- 7) SUMMARIES -----------------------------------
+decile_summary <- analysis_dt[, .(
+  n_genes = .N,
+  median_h2 = median(h2_GREML, na.rm = TRUE),
+  prop_h2_sig = mean(Pval_GREML < 0.05, na.rm = TRUE),
+  median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
+  median_open_100kb = median(open_count_100kb, na.rm = TRUE),
+  median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE)
+), by = post_mean_bin][order(post_mean_bin)]
+
+fwrite(decile_summary, file.path(cfg$output_dir, "decile_feature_summary.tsv"), sep = "\t")
+
+cor_dt <- rbindlist(list(
+  safe_spearman(analysis_dt$post_mean, analysis_dt$h2_GREML, "post_mean", "h2_GREML"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$enh_count_100kb, "post_mean", "enh_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$open_count_100kb, "post_mean", "open_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_count_100kb, "post_mean", "repeat_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_count_100kb, "h2_GREML", "enh_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$open_count_100kb, "h2_GREML", "open_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_count_100kb, "h2_GREML", "repeat_count_100kb")
+))
+fwrite(cor_dt, file.path(cfg$output_dir, "spearman_correlations.tsv"), sep = "\t")
+
+# --------------------------- 8) ASSOCIATION MODELS ----------------------------
+model_dt <- copy(analysis_dt)
+model_dt <- model_dt[
+  is.finite(h2_GREML) & is.finite(post_mean) & is.finite(mean_tpm) & is.finite(gene_length)
+]
+model_dt[, h2_sig := as.integer(Pval_GREML < 0.05)]
+
+lm_fit <- lm(
+  h2_GREML ~ scale(log1p(enh_count_100kb)) +
+    scale(log1p(open_count_100kb)) +
+    scale(log1p(repeat_count_100kb)) +
+    scale(log1p(mean_tpm)) +
+    scale(log1p(gene_length)) +
+    factor(post_mean_bin),
+  data = model_dt
+)
+fwrite(as.data.table(tidy(lm_fit)), file.path(cfg$output_dir, "model_lm_h2.tsv"), sep = "\t")
+
+glm_fit <- glm(
+  h2_sig ~ scale(log1p(enh_count_100kb)) +
+    scale(log1p(open_count_100kb)) +
+    scale(log1p(repeat_count_100kb)) +
+    scale(log1p(mean_tpm)) +
+    scale(log1p(gene_length)) +
+    factor(post_mean_bin),
+  family = binomial(),
+  data = model_dt
+)
+fwrite(as.data.table(tidy(glm_fit)), file.path(cfg$output_dir, "model_glm_h2sig.tsv"), sep = "\t")
+
+# Repeat-class model uses major classes that are present.
+repeat_cols <- grep("^repeat_class_", names(model_dt), value = TRUE)
+if (length(repeat_cols) > 0L) {
+  repeat_cols <- repeat_cols[order(colSums(model_dt[, ..repeat_cols]), decreasing = TRUE)]
+  repeat_cols <- head(repeat_cols, 6L)
+  rhs <- paste(c(
+    paste0("scale(log1p(", repeat_cols, "))"),
+    "scale(log1p(mean_tpm))",
+    "scale(log1p(gene_length))",
+    "factor(post_mean_bin)"
+  ), collapse = " + ")
+  formula_repeat <- as.formula(paste("h2_GREML ~", rhs))
+  rep_fit <- lm(formula_repeat, data = model_dt)
+  fwrite(as.data.table(tidy(rep_fit)), file.path(cfg$output_dir, "model_lm_repeat_classes.tsv"), sep = "\t")
+}
+
+# ------------------------------- 9) PLOTS -------------------------------------
+message("Step 7: generate summary plots")
+
+p_decile <- ggplot(decile_summary, aes(x = post_mean_bin, y = median_h2)) +
+  geom_line(color = "#1f3b4d", linewidth = 1) +
+  geom_point(color = "#d1495b", size = 2.5) +
+  scale_x_continuous(breaks = 1:10) +
+  labs(
+    title = "Median h2_GREML across s_het deciles",
+    x = "s_het post_mean decile",
+    y = "Median h2_GREML"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(
+  filename = file.path(cfg$output_dir, "plots", "median_h2_by_decile.pdf"),
+  plot = p_decile, width = 8, height = 5
+)
+
+p_reg <- analysis_dt %>%
+  as_tibble() %>%
+  select(h2_GREML, post_mean_bin, enh_count_100kb, open_count_100kb) %>%
+  pivot_longer(cols = c(enh_count_100kb, open_count_100kb), names_to = "feature", values_to = "count") %>%
+  ggplot(aes(x = log1p(count), y = h2_GREML)) +
+  geom_point(alpha = 0.15, size = 0.8, color = "gray35") +
+  geom_smooth(method = "gam", color = "#e07a5f", fill = "#e07a5f", alpha = 0.2) +
+  facet_wrap(~feature, scales = "free_x") +
+  labs(
+    title = "Regulatory feature burden vs heritability",
+    x = "log1p(feature count within +/-100 kb)",
+    y = "h2_GREML"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(
+  filename = file.path(cfg$output_dir, "plots", "regulatory_burden_vs_h2.pdf"),
+  plot = p_reg, width = 10, height = 5.5
+)
+
+rep_cols <- grep("^repeat_class_", names(analysis_dt), value = TRUE)
+if (length(rep_cols) > 0L) {
+  rep_heat <- analysis_dt %>%
+    as_tibble() %>%
+    select(post_mean_bin, all_of(rep_cols)) %>%
+    pivot_longer(cols = all_of(rep_cols), names_to = "rep_class", values_to = "count") %>%
+    group_by(post_mean_bin, rep_class) %>%
+    summarize(median_count = median(count, na.rm = TRUE), .groups = "drop")
+
+  p_heat <- ggplot(rep_heat, aes(x = factor(post_mean_bin), y = rep_class, fill = median_count)) +
+    geom_tile() +
+    scale_fill_viridis_c(option = "C") +
+    labs(
+      title = "Repeat class burden by s_het decile",
+      x = "s_het decile",
+      y = "Repeat class",
+      fill = "Median count"
+    ) +
+    theme_minimal(base_size = 11)
+
+  ggsave(
+    filename = file.path(cfg$output_dir, "plots", "repeat_class_heatmap.pdf"),
+    plot = p_heat, width = 9, height = 6
+  )
+}
+
+writeLines(capture.output(sessionInfo()), con = file.path(cfg$output_dir, "sessionInfo.txt"))
+
+message("Done. Outputs written to: ", normalizePath(cfg$output_dir))
