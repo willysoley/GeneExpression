@@ -699,25 +699,33 @@ if (length(repeat_cols) > 0L) {
     head(6) %>%
     .[, as.character(repeat_col)]
 
-  repeat_terms <- c(
-    paste0("scale(log1p(", top_repeat_cols, "))"),
-    "scale(log1p(mean_tpm))",
-    "scale(log1p(gene_length))",
-    post_mean_term
-  ) %>%
-    .[!is.na(.)]
+  top_repeat_cols <- top_repeat_cols %>%
+    .[!is.na(.) & nzchar(.)] %>%
+    .[. %in% names(model_dt)]
 
-  rhs <- repeat_terms %>%
-    paste(collapse = " + ")
+  if (length(top_repeat_cols) == 0L) {
+    message("Skipping repeat-class lm: no valid repeat_class predictors with variation.")
+  } else {
+    repeat_terms <- c(
+      sprintf("scale(log1p(`%s`))", top_repeat_cols),
+      "scale(log1p(mean_tpm))",
+      "scale(log1p(gene_length))",
+      post_mean_term
+    ) %>%
+      .[!is.na(.) & nzchar(.)]
 
-  repeat_formula <- as.formula(paste("h2_GREML ~", rhs))
-  repeat_fit <- lm(repeat_formula, data = model_dt)
+    rhs <- repeat_terms %>%
+      paste(collapse = " + ")
 
-  fwrite(
-    as.data.table(tidy(repeat_fit)),
-    file.path(cfg$output_dir, "model_lm_repeat_classes.tsv"),
-    sep = "\t"
-  )
+    repeat_formula <- as.formula(paste("h2_GREML ~", rhs))
+    repeat_fit <- lm(repeat_formula, data = model_dt)
+
+    fwrite(
+      as.data.table(tidy(repeat_fit)),
+      file.path(cfg$output_dir, "model_lm_repeat_classes.tsv"),
+      sep = "\t"
+    )
+  }
 }
 
 # ------------------------------- 9) PLOTS -------------------------------------
