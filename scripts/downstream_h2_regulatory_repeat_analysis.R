@@ -15,6 +15,8 @@ suppressPackageStartupMessages({
   library(broom)
 })
 
+setwd("/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260302_GE_Heritability_and_Repeat/GeneExpression/")
+
 # ------------------------------ USER CONFIG -----------------------------------
 # Edit these paths for your environment before running.
 cfg <- list(
