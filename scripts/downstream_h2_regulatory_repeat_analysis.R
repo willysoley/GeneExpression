@@ -106,6 +106,7 @@ normalize_repeat_class <- function(x) {
   x %>%
     as.character() %>%
     str_replace_all("\\?", "") %>%
+    str_replace("^class[_\\s]+", "") %>%
     str_squish() %>%
     na_if("")
 }
@@ -1214,37 +1215,85 @@ repeat_class_count_cols <- names(repeat_class_dt) %>%
   str_subset("^repeat_class_.*_count_(100kb|250kb|500kb|1mb)$")
 
 if (length(repeat_class_count_cols) > 0L) {
-  for (src_col in repeat_class_count_cols) {
-    rep_class_name <- src_col %>%
-      str_remove("^repeat_class_") %>%
-      str_remove("_count_(100kb|250kb|500kb|1mb)$")
-    window_label <- src_col %>%
-      str_extract("(100kb|250kb|500kb|1mb)$")
+  repeat_alias_map <- tibble(src_col = repeat_class_count_cols) %>%
+    mutate(
+      rep_class_name = src_col %>%
+        str_remove("^repeat_class_") %>%
+        str_remove("_count_(100kb|250kb|500kb|1mb)$") %>%
+        normalize_repeat_class() %>%
+        sanitize_name(),
+      window_label = src_col %>%
+        str_extract("(100kb|250kb|500kb|1mb)$"),
+      alias_col_window = paste0("repeat_", rep_class_name, "_count_", window_label)
+    ) %>%
+    filter(!is.na(rep_class_name), rep_class_name != "")
 
-    alias_col_window <- paste0("repeat_", rep_class_name, "_count_", window_label)
-    if (!alias_col_window %in% names(repeat_class_dt)) {
-      repeat_class_dt <- repeat_class_dt %>%
-        mutate(!!alias_col_window := .data[[src_col]])
+  alias_groups <- split(repeat_alias_map$src_col, repeat_alias_map$alias_col_window)
+  for (alias_col_window in names(alias_groups)) {
+    src_cols <- alias_groups[[alias_col_window]]
+    repeat_class_dt <- repeat_class_dt %>%
+      mutate(
+        !!alias_col_window := rowSums(
+          as.matrix(select(., all_of(src_cols))),
+          na.rm = TRUE
+        )
+      )
+  }
+
+  base_types <- repeat_alias_map$rep_class_name %>% unique()
+  for (rep_type in base_types) {
+    for (window_label in c("100kb", "250kb", "500kb", "1mb")) {
+      alias_col_window <- paste0("repeat_", rep_type, "_count_", window_label)
+      if (!alias_col_window %in% names(repeat_class_dt)) {
+        repeat_class_dt <- repeat_class_dt %>%
+          mutate(!!alias_col_window := 0)
+      }
     }
 
-    if (identical(window_label, "100kb")) {
-      alias_col <- paste0("repeat_", rep_class_name, "_count")
-      if (!alias_col %in% names(repeat_class_dt)) {
-        repeat_class_dt <- repeat_class_dt %>%
-          mutate(!!alias_col := .data[[src_col]])
-      }
+    alias_col <- paste0("repeat_", rep_type, "_count")
+    alias_100kb <- paste0("repeat_", rep_type, "_count_100kb")
+    if (!alias_col %in% names(repeat_class_dt) && alias_100kb %in% names(repeat_class_dt)) {
+      repeat_class_dt <- repeat_class_dt %>%
+        mutate(!!alias_col := .data[[alias_100kb]])
     }
   }
 }
 
-repeat_family_dt <- count_by_group(
-  window_gr = gene_win_small,
-  feature_gr = rep_gr,
-  feature_group = mcols(rep_gr)$repFamily,
-  prefix = "repeat_family",
-  suffix = "_count_100kb"
+repeat_family_dt <- list(
+  count_by_group(
+    window_gr = gene_win_small,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repFamily,
+    prefix = "repeat_family",
+    suffix = "_count_100kb"
+  ) %>%
+    as_tibble(),
+  count_by_group(
+    window_gr = gene_win_quarter,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repFamily,
+    prefix = "repeat_family",
+    suffix = "_count_250kb"
+  ) %>%
+    as_tibble(),
+  count_by_group(
+    window_gr = gene_win_mid,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repFamily,
+    prefix = "repeat_family",
+    suffix = "_count_500kb"
+  ) %>%
+    as_tibble(),
+  count_by_group(
+    window_gr = gene_win_cis,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repFamily,
+    prefix = "repeat_family",
+    suffix = "_count_1mb"
+  ) %>%
+    as_tibble()
 ) %>%
-  as_tibble()
+  reduce(left_join, by = "gene_id_clean")
 
 # --------------------------- 6) FINAL ANALYSIS TABLE --------------------------
 analysis_dt <- merged %>%
@@ -1722,6 +1771,12 @@ if (length(repeat_type_window_cols) > 0L) {
     )
 
   window_levels <- c("100kb", "250kb", "500kb", "1mb")
+  window_label_map <- c(
+    "100kb" = "100 kb",
+    "250kb" = "250 kb",
+    "500kb" = "500 kb",
+    "1mb" = "1 Mb"
+  )
   for (window_label in window_levels) {
     plot_dt <- repeat_type_trend_long %>%
       filter(as.character(window) == window_label)
@@ -1729,6 +1784,13 @@ if (length(repeat_type_window_cols) > 0L) {
     if (nrow(plot_dt) == 0L) {
       next
     }
+
+    n_types <- plot_dt %>%
+      pull(repeat_type) %>%
+      unique() %>%
+      length()
+    ncol_plot <- 3L
+    plot_height <- max(12, ceiling(n_types / ncol_plot) * 3.0)
 
     p_repeat_types <- ggplot(
       plot_dt,
@@ -1738,16 +1800,19 @@ if (length(repeat_type_window_cols) > 0L) {
       geom_point(size = 1.3) +
       scale_x_continuous(breaks = 1:10) +
       scale_color_manual(values = c("Mean" = "#3a86ff", "Median" = "#fb5607")) +
-      facet_wrap(~repeat_type, scales = "free_y", ncol = 4) +
+      facet_wrap(~repeat_type, scales = "free_y", ncol = ncol_plot) +
       labs(
-        title = paste0("Repeat Type Counts Across s_het Deciles (", window_label, " window)"),
+        title = paste0("Repeat Type Counts Across s_het Deciles (", window_label_map[[window_label]], " window)"),
         subtitle = "Mean and median counts by repeat subtype",
         x = "s_het post_mean decile",
         y = "Repeat count",
         color = "Statistic"
       ) +
-      theme_minimal(base_size = 10) +
-      theme(legend.position = "top")
+      theme_minimal(base_size = 12) +
+      theme(
+        legend.position = "top",
+        strip.text = element_text(size = 9)
+      )
 
     ggsave(
       filename = file.path(
@@ -1756,14 +1821,14 @@ if (length(repeat_type_window_cols) > 0L) {
         paste0("postmean_repeat_type_trends_mean_median_", window_label, ".pdf")
       ),
       plot = p_repeat_types,
-      width = 16,
-      height = 10
+      width = 20,
+      height = plot_height
     )
   }
 }
 
 repeat_family_cols <- names(analysis_tbl) %>%
-  str_subset("^repeat_family_.*_count_100kb$")
+  str_subset("^repeat_family_.*_count_(100kb|250kb|500kb|1mb)$")
 
 if (length(repeat_family_cols) > 0L) {
   repeat_family_postmean_stats <- analysis_tbl %>%
@@ -1776,9 +1841,12 @@ if (length(repeat_family_cols) > 0L) {
     mutate(
       repeat_family = repeat_family_col %>%
         str_remove("^repeat_family_") %>%
-        str_remove("_count_100kb$")
+        str_remove("_count_(100kb|250kb|500kb|1mb)$"),
+      window = repeat_family_col %>%
+        str_extract("(100kb|250kb|500kb|1mb)$"),
+      window = factor(window, levels = c("100kb", "250kb", "500kb", "1mb"))
     ) %>%
-    group_by(post_mean_bin, repeat_family) %>%
+    group_by(post_mean_bin, repeat_family, window) %>%
     summarise(
       mean_value = mean(value, na.rm = TRUE),
       median_value = median(value, na.rm = TRUE),
@@ -1792,38 +1860,59 @@ if (length(repeat_family_cols) > 0L) {
     sep = "\t"
   )
 
-  top_families <- repeat_family_postmean_stats %>%
-    group_by(repeat_family) %>%
-    summarise(mean_median = mean(median_value, na.rm = TRUE), .groups = "drop") %>%
-    arrange(desc(mean_median)) %>%
-    slice_head(n = 25) %>%
-    pull(repeat_family)
-
-  family_heat_dt <- repeat_family_postmean_stats %>%
-    filter(repeat_family %in% top_families) %>%
-    mutate(repeat_family = factor(repeat_family, levels = top_families))
-
-  p_repeat_family_heat <- ggplot(
-    family_heat_dt,
-    aes(x = factor(post_mean_bin), y = repeat_family, fill = median_value)
-  ) +
-    geom_tile() +
-    scale_fill_viridis_c(option = "C") +
-    labs(
-      title = "Top Repeat Families by s_het Decile (100kb window)",
-      subtitle = "Median repeat-family counts by decile",
-      x = "s_het post_mean decile",
-      y = "Repeat family",
-      fill = "Median count"
-    ) +
-    theme_minimal(base_size = 10)
-
-  ggsave(
-    filename = file.path(cfg$output_dir, "plots", "postmean_repeat_family_heatmap_top25_100kb.pdf"),
-    plot = p_repeat_family_heat,
-    width = 10,
-    height = 8
+  window_levels <- c("100kb", "250kb", "500kb", "1mb")
+  window_label_map <- c(
+    "100kb" = "100 kb",
+    "250kb" = "250 kb",
+    "500kb" = "500 kb",
+    "1mb" = "1 Mb"
   )
+
+  for (window_label in window_levels) {
+    window_dt <- repeat_family_postmean_stats %>%
+      filter(as.character(window) == window_label)
+
+    if (nrow(window_dt) == 0L) {
+      next
+    }
+
+    top_families <- window_dt %>%
+      group_by(repeat_family) %>%
+      summarise(mean_median = mean(median_value, na.rm = TRUE), .groups = "drop") %>%
+      arrange(desc(mean_median)) %>%
+      slice_head(n = 25) %>%
+      pull(repeat_family)
+
+    family_heat_dt <- window_dt %>%
+      filter(repeat_family %in% top_families) %>%
+      mutate(repeat_family = factor(repeat_family, levels = top_families))
+
+    p_repeat_family_heat <- ggplot(
+      family_heat_dt,
+      aes(x = factor(post_mean_bin), y = repeat_family, fill = median_value)
+    ) +
+      geom_tile() +
+      scale_fill_viridis_c(option = "C") +
+      labs(
+        title = paste0("Top Repeat Families by s_het Decile (", window_label_map[[window_label]], " window)"),
+        subtitle = "Median repeat-family counts by decile",
+        x = "s_het post_mean decile",
+        y = "Repeat family",
+        fill = "Median count"
+      ) +
+      theme_minimal(base_size = 11)
+
+    ggsave(
+      filename = file.path(
+        cfg$output_dir,
+        "plots",
+        paste0("postmean_repeat_family_heatmap_top25_", window_label, ".pdf")
+      ),
+      plot = p_repeat_family_heat,
+      width = 13,
+      height = 10
+    )
+  }
 }
 
 p_decile <- ggplot(decile_summary, aes(x = post_mean_bin, y = median_h2)) +
