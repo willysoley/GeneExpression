@@ -1404,6 +1404,219 @@ if (length(repeat_cols) > 0L) {
 # ------------------------------- 9) PLOTS -------------------------------------
 message("Step 7: generate summary plots")
 
+analysis_tbl <- analysis_dt %>%
+  as_tibble()
+
+postmean_feature_cols <- names(analysis_tbl) %>%
+  str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_[A-Za-z0-9_]+_count$)")
+
+postmean_feature_cols <- postmean_feature_cols[postmean_feature_cols %in% names(analysis_tbl)]
+postmean_feature_cols <- setdiff(postmean_feature_cols, "post_mean_bin")
+
+if (length(postmean_feature_cols) > 0L) {
+  postmean_feature_stats <- analysis_tbl %>%
+    select(post_mean_bin, all_of(postmean_feature_cols)) %>%
+    pivot_longer(
+      cols = -post_mean_bin,
+      names_to = "feature",
+      values_to = "value"
+    ) %>%
+    group_by(post_mean_bin, feature) %>%
+    summarise(
+      n_genes = n(),
+      mean_value = mean(value, na.rm = TRUE),
+      median_value = median(value, na.rm = TRUE),
+      q25_value = quantile(value, 0.25, na.rm = TRUE, names = FALSE),
+      q75_value = quantile(value, 0.75, na.rm = TRUE, names = FALSE),
+      prop_nonzero = mean(value > 0, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  fwrite(
+    as.data.table(postmean_feature_stats),
+    file.path(cfg$output_dir, "postmean_bin_feature_summary.tsv"),
+    sep = "\t"
+  )
+
+  postmean_feature_trend_long <- postmean_feature_stats %>%
+    select(post_mean_bin, feature, mean_value, median_value) %>%
+    pivot_longer(
+      cols = c(mean_value, median_value),
+      names_to = "stat",
+      values_to = "value"
+    ) %>%
+    mutate(
+      stat = recode(
+        stat,
+        mean_value = "Mean",
+        median_value = "Median"
+      )
+    )
+
+  p_postmean_all <- ggplot(
+    postmean_feature_trend_long,
+    aes(x = post_mean_bin, y = value, color = stat, group = stat)
+  ) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.5) +
+    scale_x_continuous(breaks = 1:10) +
+    scale_color_manual(values = c("Mean" = "#457b9d", "Median" = "#e76f51")) +
+    facet_wrap(~feature, scales = "free_y", ncol = 4) +
+    labs(
+      title = "Feature Trends Across s_het post_mean Deciles",
+      subtitle = "Mean and median by decile for all count-based features",
+      x = "s_het post_mean decile",
+      y = "Feature value",
+      color = "Statistic"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "top")
+
+  ggsave(
+    filename = file.path(cfg$output_dir, "plots", "postmean_all_feature_trends_mean_median.pdf"),
+    plot = p_postmean_all,
+    width = 16,
+    height = 12
+  )
+}
+
+reg_decile_cols <- c(
+  "enh_link_active_biosample_n",
+  "enh_link_mean_count_active",
+  "enh_count_100kb",
+  "enh_count_1mb",
+  "enh_overlap_gene_body_n",
+  "open_count_100kb",
+  "open_count_1mb",
+  "open_overlap_gene_body_n",
+  "repeat_count_100kb",
+  "repeat_count_1mb",
+  "repeat_overlap_gene_body_n"
+)
+reg_decile_cols <- reg_decile_cols[reg_decile_cols %in% names(analysis_tbl)]
+
+if (length(reg_decile_cols) > 0L) {
+  reg_postmean_stats <- analysis_tbl %>%
+    select(post_mean_bin, all_of(reg_decile_cols)) %>%
+    pivot_longer(
+      cols = -post_mean_bin,
+      names_to = "feature",
+      values_to = "value"
+    ) %>%
+    group_by(post_mean_bin, feature) %>%
+    summarise(
+      mean_value = mean(value, na.rm = TRUE),
+      median_value = median(value, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(
+      cols = c(mean_value, median_value),
+      names_to = "stat",
+      values_to = "value"
+    ) %>%
+    mutate(
+      stat = recode(
+        stat,
+        mean_value = "Mean",
+        median_value = "Median"
+      )
+    )
+
+  p_reg_postmean <- ggplot(
+    reg_postmean_stats,
+    aes(x = post_mean_bin, y = value, color = stat, group = stat)
+  ) +
+    geom_line(linewidth = 0.9) +
+    geom_point(size = 1.8) +
+    scale_x_continuous(breaks = 1:10) +
+    scale_color_manual(values = c("Mean" = "#2a9d8f", "Median" = "#e76f51")) +
+    facet_wrap(~feature, scales = "free_y", ncol = 3) +
+    labs(
+      title = "Regulatory and Repeat Burden vs s_het Decile",
+      subtitle = "Mean and median feature values by post_mean bin",
+      x = "s_het post_mean decile",
+      y = "Feature value",
+      color = "Statistic"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(legend.position = "top")
+
+  ggsave(
+    filename = file.path(cfg$output_dir, "plots", "postmean_regulatory_repeat_trends_mean_median.pdf"),
+    plot = p_reg_postmean,
+    width = 13,
+    height = 9
+  )
+}
+
+repeat_type_cols <- names(analysis_tbl) %>%
+  str_subset("^repeat_[A-Za-z0-9_]+_count$") %>%
+  setdiff(c("repeat_count_100kb", "repeat_count_1mb", "repeat_count_tss_100kb", "repeat_count_tss_1mb"))
+
+if (length(repeat_type_cols) > 0L) {
+  repeat_type_postmean_stats <- analysis_tbl %>%
+    select(post_mean_bin, all_of(repeat_type_cols)) %>%
+    pivot_longer(
+      cols = -post_mean_bin,
+      names_to = "repeat_type",
+      values_to = "value"
+    ) %>%
+    group_by(post_mean_bin, repeat_type) %>%
+    summarise(
+      mean_value = mean(value, na.rm = TRUE),
+      median_value = median(value, na.rm = TRUE),
+      prop_nonzero = mean(value > 0, na.rm = TRUE),
+      .groups = "drop"
+    )
+
+  fwrite(
+    as.data.table(repeat_type_postmean_stats),
+    file.path(cfg$output_dir, "postmean_bin_repeat_type_summary.tsv"),
+    sep = "\t"
+  )
+
+  repeat_type_trend_long <- repeat_type_postmean_stats %>%
+    select(post_mean_bin, repeat_type, mean_value, median_value) %>%
+    pivot_longer(
+      cols = c(mean_value, median_value),
+      names_to = "stat",
+      values_to = "value"
+    ) %>%
+    mutate(
+      stat = recode(
+        stat,
+        mean_value = "Mean",
+        median_value = "Median"
+      )
+    )
+
+  p_repeat_types <- ggplot(
+    repeat_type_trend_long,
+    aes(x = post_mean_bin, y = value, color = stat, group = stat)
+  ) +
+    geom_line(linewidth = 0.8) +
+    geom_point(size = 1.4) +
+    scale_x_continuous(breaks = 1:10) +
+    scale_color_manual(values = c("Mean" = "#3a86ff", "Median" = "#fb5607")) +
+    facet_wrap(~repeat_type, scales = "free_y", ncol = 4) +
+    labs(
+      title = "Repeat Type Counts Across s_het Deciles",
+      subtitle = "Mean and median counts by repeat subtype",
+      x = "s_het post_mean decile",
+      y = "Repeat count",
+      color = "Statistic"
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(legend.position = "top")
+
+  ggsave(
+    filename = file.path(cfg$output_dir, "plots", "postmean_repeat_type_trends_mean_median.pdf"),
+    plot = p_repeat_types,
+    width = 16,
+    height = 10
+  )
+}
+
 p_decile <- ggplot(decile_summary, aes(x = post_mean_bin, y = median_h2)) +
   geom_line(color = "#1f3b4d", linewidth = 1) +
   geom_point(color = "#d1495b", size = 2.5) +
