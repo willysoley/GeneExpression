@@ -1785,45 +1785,62 @@ if (length(repeat_type_window_cols) > 0L) {
       next
     }
 
-    n_types <- plot_dt %>%
-      pull(repeat_type) %>%
-      unique() %>%
-      length()
     ncol_plot <- 3L
-    plot_height <- max(12, ceiling(n_types / ncol_plot) * 3.0)
+    types_per_page <- 24L
+    type_levels <- plot_dt %>%
+      pull(repeat_type) %>%
+      as.character() %>%
+      unique() %>%
+      sort()
 
-    p_repeat_types <- ggplot(
-      plot_dt,
-      aes(x = post_mean_bin, y = value, color = stat, group = stat)
-    ) +
-      geom_line(linewidth = 0.8) +
-      geom_point(size = 1.3) +
-      scale_x_continuous(breaks = 1:10) +
-      scale_color_manual(values = c("Mean" = "#3a86ff", "Median" = "#fb5607")) +
-      facet_wrap(~repeat_type, scales = "free_y", ncol = ncol_plot) +
-      labs(
-        title = paste0("Repeat Type Counts Across s_het Deciles (", window_label_map[[window_label]], " window)"),
-        subtitle = "Mean and median counts by repeat subtype",
-        x = "s_het post_mean decile",
-        y = "Repeat count",
-        color = "Statistic"
+    page_ids <- ceiling(seq_along(type_levels) / types_per_page)
+    type_pages <- split(type_levels, page_ids)
+
+    for (page_idx in seq_along(type_pages)) {
+      page_types <- type_pages[[page_idx]]
+      page_dt <- plot_dt %>%
+        filter(as.character(repeat_type) %in% page_types) %>%
+        mutate(repeat_type = factor(as.character(repeat_type), levels = page_types))
+
+      n_rows <- ceiling(length(page_types) / ncol_plot)
+      plot_height <- max(12, min(48, n_rows * 3.2))
+
+      p_repeat_types <- ggplot(
+        page_dt,
+        aes(x = post_mean_bin, y = value, color = stat, group = stat)
       ) +
-      theme_minimal(base_size = 12) +
-      theme(
-        legend.position = "top",
-        strip.text = element_text(size = 9)
-      )
+        geom_line(linewidth = 0.8) +
+        geom_point(size = 1.3) +
+        scale_x_continuous(breaks = 1:10) +
+        scale_color_manual(values = c("Mean" = "#3a86ff", "Median" = "#fb5607")) +
+        facet_wrap(~repeat_type, scales = "free_y", ncol = ncol_plot) +
+        labs(
+          title = paste0("Repeat Type Counts Across s_het Deciles (", window_label_map[[window_label]], " window)"),
+          subtitle = paste0("Mean and median counts by repeat subtype (page ", page_idx, " of ", length(type_pages), ")"),
+          x = "s_het post_mean decile",
+          y = "Repeat count",
+          color = "Statistic"
+        ) +
+        theme_minimal(base_size = 12) +
+        theme(
+          legend.position = "top",
+          strip.text = element_text(size = 9)
+        )
 
-    ggsave(
-      filename = file.path(
-        cfg$output_dir,
-        "plots",
+      out_name <- if (length(type_pages) > 1L) {
+        paste0("postmean_repeat_type_trends_mean_median_", window_label, "_p", page_idx, ".pdf")
+      } else {
         paste0("postmean_repeat_type_trends_mean_median_", window_label, ".pdf")
-      ),
-      plot = p_repeat_types,
-      width = 20,
-      height = plot_height
-    )
+      }
+
+      ggsave(
+        filename = file.path(cfg$output_dir, "plots", out_name),
+        plot = p_repeat_types,
+        width = 20,
+        height = plot_height,
+        limitsize = FALSE
+      )
+    }
   }
 }
 
