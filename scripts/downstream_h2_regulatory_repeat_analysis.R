@@ -324,7 +324,7 @@ count_overlaps_dt <- function(window_gr, feature_gr, col_name) {
     as.data.table()
 }
 
-count_by_group <- function(window_gr, feature_gr, feature_group, prefix) {
+count_by_group <- function(window_gr, feature_gr, feature_group, prefix, suffix = "") {
   group_levels <- feature_group %>%
     unique() %>%
     sort()
@@ -351,7 +351,7 @@ count_by_group <- function(window_gr, feature_gr, feature_group, prefix) {
 
       tibble(
         gene_id_clean = mcols(window_gr)$gene_id_clean,
-        !!paste0(prefix, "_", clean_name) := as.integer(
+        !!paste0(prefix, "_", clean_name, suffix) := as.integer(
           countOverlaps(window_gr, feature_gr[idx], ignore.strand = TRUE)
         )
       ) %>%
@@ -363,54 +363,6 @@ count_by_group <- function(window_gr, feature_gr, feature_group, prefix) {
     x = class_tables,
     init = as.data.table(out)
   )
-}
-
-sum_overlap_bp <- function(query_gr, subject_gr) {
-  hits <- findOverlaps(query_gr, subject_gr, ignore.strand = TRUE)
-  out <- numeric(length(query_gr))
-
-  if (length(hits) == 0L) {
-    return(out)
-  }
-
-  qh <- queryHits(hits)
-  sh <- subjectHits(hits)
-  ov_bp <- width(pintersect(query_gr[qh], subject_gr[sh]))
-  ov_sum <- tapply(ov_bp, qh, sum)
-  out[as.integer(names(ov_sum))] <- as.numeric(ov_sum)
-  out
-}
-
-count_and_bp_by_group <- function(window_gr, feature_gr, feature_group, prefix, suffix = "") {
-  class_levels <- feature_group %>%
-    unique() %>%
-    sort()
-  class_levels <- class_levels[!is.na(class_levels) & class_levels != ""]
-
-  out <- data.table(gene_id_clean = mcols(window_gr)$gene_id_clean)
-  if (length(class_levels) == 0L) {
-    return(list(table = out, class_names = character(0)))
-  }
-
-  class_names <- class_levels %>%
-    as.character() %>%
-    sanitize_name() %>%
-    make.unique()
-
-  for (i in seq_along(class_levels)) {
-    raw_cls <- class_levels[[i]]
-    cls <- class_names[[i]]
-    idx <- which(feature_group == raw_cls)
-    cls_gr <- feature_gr[idx]
-
-    count_col <- paste0(prefix, "_", cls, "_count", suffix)
-    bp_col <- paste0(prefix, "_", cls, "_bp", suffix)
-
-    out[[count_col]] <- as.integer(countOverlaps(window_gr, cls_gr, ignore.strand = TRUE))
-    out[[bp_col]] <- as.numeric(sum_overlap_bp(window_gr, cls_gr))
-  }
-
-  list(table = out, class_names = class_names)
 }
 
 resolve_roadmap_link_files <- function(cfg) {
@@ -569,8 +521,7 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
     biosample = character(0),
     chr = character(0),
     start = numeric(0),
-    end = numeric(0),
-    enhancer_len = numeric(0)
+    end = numeric(0)
   )
 
   biosample <- extract_biosample_id(path)
@@ -599,10 +550,9 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
       ) %>%
       inner_join(as_tibble(gene_lookup_id_dt), by = "gene_id_clean") %>%
       mutate(
-        biosample = biosample,
-        enhancer_len = end - start
+        biosample = biosample
       ) %>%
-      select(gene_id_clean, biosample, chr, start, end, enhancer_len)
+      select(gene_id_clean, biosample, chr, start, end)
 
     return(as.data.table(link_dt))
   }
@@ -644,8 +594,7 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
       end > start,
       !is.na(gene_raw),
       gene_raw != ""
-    ) %>%
-    mutate(enhancer_len = end - start)
+    )
 
   if (gene_is_ensg) {
     link_dt <- link_dt %>%
@@ -659,7 +608,7 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
 
   link_dt %>%
     mutate(biosample = biosample) %>%
-    select(gene_id_clean, biosample, chr, start, end, enhancer_len) %>%
+    select(gene_id_clean, biosample, chr, start, end) %>%
     as.data.table()
 }
 
@@ -704,8 +653,7 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
     return(out %>%
       mutate(
         enh_link_active_biosample_n = 0,
-        enh_link_mean_count_active = 0,
-        enh_link_mean_total_bp_active = 0
+        enh_link_mean_count_active = 0
       ) %>%
       as.data.table())
   }
@@ -715,17 +663,14 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
     group_by(gene_id_clean, biosample) %>%
     summarise(
       enh_link_n = n(),
-      enh_link_total_bp = sum(enhancer_len, na.rm = TRUE),
       .groups = "drop"
     )
 
   summary_dt <- per_biosample %>%
-    filter(enh_link_total_bp > 0) %>%
     group_by(gene_id_clean) %>%
     summarise(
       enh_link_active_biosample_n = n_distinct(biosample),
       enh_link_mean_count_active = mean(enh_link_n, na.rm = TRUE),
-      enh_link_mean_total_bp_active = mean(enh_link_total_bp, na.rm = TRUE),
       .groups = "drop"
     )
 
@@ -733,7 +678,7 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
     left_join(summary_dt, by = "gene_id_clean") %>%
     mutate(
       across(
-        c(enh_link_active_biosample_n, enh_link_mean_count_active, enh_link_mean_total_bp_active),
+        c(enh_link_active_biosample_n, enh_link_mean_count_active),
         ~ replace_na(.x, 0)
       )
     ) %>%
@@ -767,8 +712,7 @@ build_window_enhancer_features <- function(
     count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_tss_1mb") %>% as_tibble(),
     tibble(
       gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
-      enh_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, enh_gr, ignore.strand = TRUE)),
-      enh_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, enh_gr))
+      enh_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, enh_gr, ignore.strand = TRUE))
     )
   ) %>%
     reduce(left_join, by = "gene_id_clean") %>%
@@ -1098,8 +1042,7 @@ open_features <- list(
   count_overlaps_dt(tss_win_cis, open_gr, "open_count_tss_1mb") %>% as_tibble(),
   tibble(
     gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
-    open_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, open_gr, ignore.strand = TRUE)),
-    open_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, open_gr))
+    open_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, open_gr, ignore.strand = TRUE))
   )
 ) %>%
   reduce(left_join, by = "gene_id_clean")
@@ -1151,53 +1094,34 @@ rep_gr <- GRanges(
 repeat_features <- data.table(
   gene_id_clean = mcols(gene_win_small)$gene_id_clean,
   repeat_count_100kb = as.integer(countOverlaps(gene_win_small, rep_gr, ignore.strand = TRUE)),
-  repeat_bp_100kb = as.numeric(sum_overlap_bp(gene_win_small, rep_gr)),
   repeat_count_1mb = as.integer(countOverlaps(gene_win_cis, rep_gr, ignore.strand = TRUE)),
-  repeat_bp_1mb = as.numeric(sum_overlap_bp(gene_win_cis, rep_gr)),
   repeat_count_tss_100kb = as.integer(countOverlaps(tss_win_small, rep_gr, ignore.strand = TRUE)),
-  repeat_bp_tss_100kb = as.numeric(sum_overlap_bp(tss_win_small, rep_gr)),
   repeat_count_tss_1mb = as.integer(countOverlaps(tss_win_cis, rep_gr, ignore.strand = TRUE)),
-  repeat_bp_tss_1mb = as.numeric(sum_overlap_bp(tss_win_cis, rep_gr)),
-  repeat_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, rep_gr, ignore.strand = TRUE)),
-  repeat_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, rep_gr))
+  repeat_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, rep_gr, ignore.strand = TRUE))
 )
 
-repeat_class_obj <- count_and_bp_by_group(
+repeat_class_dt <- count_by_group(
   window_gr = gene_win_small,
   feature_gr = rep_gr,
   feature_group = mcols(rep_gr)$repClass,
   prefix = "repeat_class",
-  suffix = "_100kb"
-)
-repeat_class_dt <- repeat_class_obj$table %>% as_tibble()
+  suffix = "_count_100kb"
+) %>%
+  as_tibble()
 
 repeat_count_class_cols <- names(repeat_class_dt) %>%
   str_subset("^repeat_class_.*_count_100kb$")
-repeat_bp_class_cols <- names(repeat_class_dt) %>%
-  str_subset("^repeat_class_.*_bp_100kb$")
 
 if (length(repeat_count_class_cols) > 0L) {
   count_mat <- repeat_class_dt %>%
     select(all_of(repeat_count_class_cols)) %>%
     as.matrix()
-  bp_mat <- if (length(repeat_bp_class_cols) > 0L) {
-    repeat_class_dt %>%
-      select(all_of(repeat_bp_class_cols)) %>%
-      as.matrix()
-  } else {
-    matrix(0, nrow = nrow(repeat_class_dt), ncol = length(repeat_count_class_cols))
-  }
   active_mat <- count_mat > 0
   active_n <- rowSums(active_mat, na.rm = TRUE)
 
   repeat_class_dt <- repeat_class_dt %>%
     mutate(
       repeat_active_class_n_100kb = active_n,
-      repeat_mean_bp_active_class_100kb = if_else(
-        active_n > 0,
-        rowSums(bp_mat * active_mat, na.rm = TRUE) / active_n,
-        0
-      ),
       repeat_mean_count_active_class_100kb = if_else(
         active_n > 0,
         rowSums(count_mat * active_mat, na.rm = TRUE) / active_n,
@@ -1208,21 +1132,34 @@ if (length(repeat_count_class_cols) > 0L) {
   repeat_class_dt <- repeat_class_dt %>%
     mutate(
       repeat_active_class_n_100kb = 0,
-      repeat_mean_bp_active_class_100kb = 0,
       repeat_mean_count_active_class_100kb = 0
     )
 }
 
 for (cls in c("LINE", "SINE", "LTR", "DNA")) {
   count_col <- paste0("repeat_class_", cls, "_count_100kb")
-  bp_col <- paste0("repeat_class_", cls, "_bp_100kb")
   if (!count_col %in% names(repeat_class_dt)) {
     repeat_class_dt <- repeat_class_dt %>%
       mutate(!!count_col := 0)
   }
-  if (!bp_col %in% names(repeat_class_dt)) {
-    repeat_class_dt <- repeat_class_dt %>%
-      mutate(!!bp_col := 0)
+}
+
+# Add alias columns requested by user:
+# repeat_<repClass>_count, sourced from repeat_class_<repClass>_count_100kb.
+repeat_class_count_cols <- names(repeat_class_dt) %>%
+  str_subset("^repeat_class_.*_count_100kb$")
+
+if (length(repeat_class_count_cols) > 0L) {
+  for (src_col in repeat_class_count_cols) {
+    rep_class_name <- src_col %>%
+      str_remove("^repeat_class_") %>%
+      str_remove("_count_100kb$")
+    alias_col <- paste0("repeat_", rep_class_name, "_count")
+
+    if (!alias_col %in% names(repeat_class_dt)) {
+      repeat_class_dt <- repeat_class_dt %>%
+        mutate(!!alias_col := .data[[src_col]])
+    }
   }
 }
 
@@ -1237,7 +1174,7 @@ analysis_dt <- merged %>%
   left_join(repeat_class_dt, by = "gene_id_clean")
 
 count_cols <- names(analysis_dt) %>%
-  str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_bp_|repeat_overlap_|repeat_class_)")
+  str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_.*_count$)")
 
 if (length(count_cols) > 0L) {
   analysis_dt <- analysis_dt %>%
@@ -1255,36 +1192,25 @@ fwrite(as.data.table(analysis_dt), file.path(cfg$output_dir, "gene_level_feature
 expected_feature_cols <- c(
   "enh_link_active_biosample_n",
   "enh_link_mean_count_active",
-  "enh_link_mean_total_bp_active",
   "enh_count_100kb",
   "enh_count_1mb",
   "enh_count_tss_100kb",
   "enh_count_tss_1mb",
   "enh_overlap_gene_body_n",
-  "enh_overlap_gene_body_bp",
   "open_count_100kb",
   "open_count_1mb",
   "open_count_tss_100kb",
   "open_count_tss_1mb",
   "open_overlap_gene_body_n",
-  "open_overlap_gene_body_bp",
   "repeat_count_100kb",
-  "repeat_bp_100kb",
   "repeat_count_1mb",
-  "repeat_bp_1mb",
   "repeat_count_tss_100kb",
-  "repeat_bp_tss_100kb",
   "repeat_count_tss_1mb",
-  "repeat_bp_tss_1mb",
   "repeat_overlap_gene_body_n",
-  "repeat_overlap_gene_body_bp",
   "repeat_active_class_n_100kb",
   "repeat_mean_count_active_class_100kb",
-  "repeat_mean_bp_active_class_100kb",
   "repeat_class_LINE_count_100kb",
-  "repeat_class_SINE_count_100kb",
-  "repeat_class_LINE_bp_100kb",
-  "repeat_class_SINE_bp_100kb"
+  "repeat_class_SINE_count_100kb"
 )
 analysis_dt <- add_missing_numeric_cols(analysis_dt, expected_feature_cols, default_value = 0)
 
@@ -1296,7 +1222,6 @@ decile_summary <- analysis_dt %>%
     prop_h2_sig = mean(Pval_GREML < 0.05, na.rm = TRUE),
     median_enh_active_biosample_n = median(enh_link_active_biosample_n, na.rm = TRUE),
     median_enh_mean_count_active = median(enh_link_mean_count_active, na.rm = TRUE),
-    median_enh_mean_bp_active = median(enh_link_mean_total_bp_active, na.rm = TRUE),
     median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
     median_enh_1mb = median(enh_count_1mb, na.rm = TRUE),
     median_enh_overlap_gene_body_n = median(enh_overlap_gene_body_n, na.rm = TRUE),
@@ -1305,7 +1230,6 @@ decile_summary <- analysis_dt %>%
     median_open_overlap_gene_body_n = median(open_overlap_gene_body_n, na.rm = TRUE),
     median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE),
     median_repeat_1mb = median(repeat_count_1mb, na.rm = TRUE),
-    median_repeat_bp_100kb = median(repeat_bp_100kb, na.rm = TRUE),
     median_repeat_overlap_gene_body_n = median(repeat_overlap_gene_body_n, na.rm = TRUE),
     median_repeat_active_class_n_100kb = median(repeat_active_class_n_100kb, na.rm = TRUE),
     median_repeat_LINE_count_100kb = median(repeat_class_LINE_count_100kb, na.rm = TRUE),
@@ -1319,7 +1243,6 @@ fwrite(as.data.table(decile_summary), file.path(cfg$output_dir, "decile_feature_
 cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$h2_GREML, "post_mean", "h2_GREML"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_active_biosample_n, "post_mean", "enh_link_active_biosample_n"),
-  safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_mean_total_bp_active, "post_mean", "enh_link_mean_total_bp_active"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_count_100kb, "post_mean", "enh_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_overlap_gene_body_n, "post_mean", "enh_overlap_gene_body_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$open_count_100kb, "post_mean", "open_count_100kb"),
@@ -1329,7 +1252,6 @@ cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_LINE_count_100kb, "post_mean", "repeat_class_LINE_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_SINE_count_100kb, "post_mean", "repeat_class_SINE_count_100kb"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_active_biosample_n, "h2_GREML", "enh_link_active_biosample_n"),
-  safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_mean_total_bp_active, "h2_GREML", "enh_link_mean_total_bp_active"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_count_100kb, "h2_GREML", "enh_count_100kb"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_overlap_gene_body_n, "h2_GREML", "enh_overlap_gene_body_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$open_count_100kb, "h2_GREML", "open_count_100kb"),
@@ -1382,7 +1304,6 @@ if (post_mean_levels >= 2L) {
 
 primary_numeric_cols <- c(
   "enh_link_active_biosample_n",
-  "enh_link_mean_total_bp_active",
   "enh_count_100kb",
   "enh_count_1mb",
   "enh_overlap_gene_body_n",
