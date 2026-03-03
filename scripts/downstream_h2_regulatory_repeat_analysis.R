@@ -4,6 +4,7 @@ suppressPackageStartupMessages({
   library(data.table)
   library(magrittr)
   library(dplyr)
+  library(purrr)
   library(stringr)
   library(tidyr)
   library(readxl)
@@ -97,6 +98,17 @@ normalize_chr <- function(x) {
   y[y == "24"] <- "Y"
   y[y == "MT"] <- "M"
   paste0("chr", y)
+}
+
+add_missing_numeric_cols <- function(df, cols, default_value = 0) {
+  missing_cols <- setdiff(cols, names(df))
+  if (length(missing_cols) == 0L) {
+    return(df)
+  }
+
+  default_expr <- rep(list(default_value), length(missing_cols))
+  names(default_expr) <- missing_cols
+  mutate(df, !!!default_expr)
 }
 
 is_chr_like <- function(x) {
@@ -305,11 +317,11 @@ safe_spearman <- function(x, y, label_x, label_y) {
 }
 
 count_overlaps_dt <- function(window_gr, feature_gr, col_name) {
-  data.table(
+  tibble(
     gene_id_clean = mcols(window_gr)$gene_id_clean,
-    count = as.integer(countOverlaps(window_gr, feature_gr, ignore.strand = TRUE))
+    !!col_name := as.integer(countOverlaps(window_gr, feature_gr, ignore.strand = TRUE))
   ) %>%
-    setnames("count", col_name)
+    as.data.table()
 }
 
 count_by_group <- function(window_gr, feature_gr, feature_group, prefix) {
@@ -319,39 +331,37 @@ count_by_group <- function(window_gr, feature_gr, feature_group, prefix) {
 
   group_levels <- group_levels[!is.na(group_levels) & group_levels != ""]
 
-  out <- data.table(gene_id_clean = mcols(window_gr)$gene_id_clean)
+  out <- tibble(gene_id_clean = mcols(window_gr)$gene_id_clean)
   if (length(group_levels) == 0L) {
-    return(out)
+    return(as.data.table(out))
   }
 
-  group_map <- data.table(raw = as.character(group_levels)) %>%
-    .[
-      ,
-      clean := gsub("[^A-Za-z0-9]+", "_", raw)
-    ] %>%
-    .[
-      ,
-      clean := make.unique(clean)
-    ]
+  group_map <- tibble(raw = as.character(group_levels)) %>%
+    mutate(
+      clean = gsub("[^A-Za-z0-9]+", "_", raw),
+      clean = make.unique(clean)
+    )
 
   class_tables <- group_map %>%
-    split(by = "raw", keep.by = FALSE) %>%
+    split(.$raw) %>%
     lapply(function(x) {
       raw_name <- x$raw[[1]]
       clean_name <- x$clean[[1]]
       idx <- which(feature_group == raw_name)
 
-      data.table(
+      tibble(
         gene_id_clean = mcols(window_gr)$gene_id_clean,
-        count = as.integer(countOverlaps(window_gr, feature_gr[idx], ignore.strand = TRUE))
+        !!paste0(prefix, "_", clean_name) := as.integer(
+          countOverlaps(window_gr, feature_gr[idx], ignore.strand = TRUE)
+        )
       ) %>%
-        setnames("count", paste0(prefix, "_", clean_name))
+        as.data.table()
     })
 
   Reduce(
     f = function(left, right) merge(left, right, by = "gene_id_clean", all = TRUE),
     x = class_tables,
-    init = out
+    init = as.data.table(out)
   )
 }
 
@@ -497,13 +507,15 @@ resolve_roadmap_link_files <- function(cfg) {
       next
     }
 
-    file_names <- index_lines %>%
-      str_match_all('href="([^"]+)"') %>%
-      .[[1]] %>%
-      .[, 2] %>%
-      basename() %>%
-      .[str_detect(., cfg$roadmap_links_pattern)] %>%
-      unique()
+    href_matches <- str_match_all(index_lines, 'href="([^"]+)"')[[1]]
+    file_names <- if (nrow(href_matches) == 0L) {
+      character(0)
+    } else {
+      href_matches[, 2] %>%
+        basename() %>%
+        keep(~ str_detect(.x, cfg$roadmap_links_pattern)) %>%
+        unique()
+    }
 
     if (length(file_names) == 0L) {
       message("No matching Roadmap files found at index: ", idx_url)
@@ -552,47 +564,47 @@ extract_biosample_id <- function(path) {
 }
 
 extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) {
+  empty_links <- tibble(
+    gene_id_clean = character(0),
+    biosample = character(0),
+    chr = character(0),
+    start = numeric(0),
+    end = numeric(0),
+    enhancer_len = numeric(0)
+  )
+
   biosample <- extract_biosample_id(path)
   raw_dt <- fread(path, sep = "\t", header = FALSE, fill = TRUE, showProgress = FALSE)
   if (nrow(raw_dt) == 0L || ncol(raw_dt) < 4L) {
-    return(data.table(
-      gene_id_clean = character(0),
-      biosample = character(0),
-      chr = character(0),
-      start = numeric(0),
-      end = numeric(0),
-      enhancer_len = numeric(0)
-    ))
+    return(as.data.table(empty_links))
   }
 
   chr_ratio <- mean(is_chr_like(raw_dt[[1]]), na.rm = TRUE)
   ensg_ratio <- mean(grepl("^ENSG", as.character(raw_dt[[4]])), na.rm = TRUE)
 
   if (is.finite(chr_ratio) && is.finite(ensg_ratio) && chr_ratio > 0.6 && ensg_ratio > 0.5) {
-    link_dt <- data.table(
+    link_dt <- tibble(
       chr = normalize_chr(raw_dt[[1]]),
       start = suppressWarnings(as.numeric(raw_dt[[2]])),
       end = suppressWarnings(as.numeric(raw_dt[[3]])),
       gene_id_clean = strip_gene_version(as.character(raw_dt[[4]]))
     ) %>%
-      .[
-        chr %in% standard_chr &
-          is.finite(start) &
-          is.finite(end) &
-          end > start &
-          !is.na(gene_id_clean) &
-          gene_id_clean != ""
-      ] %>%
-      merge(gene_lookup_id_dt, by = "gene_id_clean", all = FALSE) %>%
-      .[
-        ,
-        `:=`(
-          biosample = biosample,
-          enhancer_len = end - start
-        )
-      ]
+      filter(
+        chr %in% standard_chr,
+        is.finite(start),
+        is.finite(end),
+        end > start,
+        !is.na(gene_id_clean),
+        gene_id_clean != ""
+      ) %>%
+      inner_join(as_tibble(gene_lookup_id_dt), by = "gene_id_clean") %>%
+      mutate(
+        biosample = biosample,
+        enhancer_len = end - start
+      ) %>%
+      select(gene_id_clean, biosample, chr, start, end, enhancer_len)
 
-    return(link_dt[, .(gene_id_clean, biosample, chr, start, end, enhancer_len)])
+    return(as.data.table(link_dt))
   }
 
   dt <- fread(path, sep = "\t", header = TRUE, fill = TRUE, showProgress = FALSE)
@@ -602,14 +614,7 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
   start_col <- intersect(c("start", "Start"), names(dt))[1]
   end_col <- intersect(c("end", "End"), names(dt))[1]
   if (is.na(gene_col) || is.na(start_col) || is.na(end_col)) {
-    return(data.table(
-      gene_id_clean = character(0),
-      biosample = character(0),
-      chr = character(0),
-      start = numeric(0),
-      end = numeric(0),
-      enhancer_len = numeric(0)
-    ))
+    return(as.data.table(empty_links))
   }
 
   chr_col <- intersect(c("chr", "chrom", "chromosome", "X", "V1"), names(dt))[1]
@@ -618,14 +623,7 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
   } else {
     idx <- detect_chr_col(dt)
     if (is.na(idx)) {
-      return(data.table(
-        gene_id_clean = character(0),
-        biosample = character(0),
-        chr = character(0),
-        start = numeric(0),
-        end = numeric(0),
-        enhancer_len = numeric(0)
-      ))
+      return(as.data.table(empty_links))
     }
     dt[[idx]]
   }
@@ -633,139 +631,113 @@ extract_roadmap_links <- function(path, gene_lookup_name_dt, gene_lookup_id_dt) 
   gene_raw <- as.character(dt[[gene_col]])
   gene_is_ensg <- mean(grepl("^ENSG", gene_raw), na.rm = TRUE) > 0.5
 
-  link_dt <- data.table(
+  link_dt <- tibble(
     chr = normalize_chr(chr_raw),
     start = suppressWarnings(as.numeric(dt[[start_col]])),
     end = suppressWarnings(as.numeric(dt[[end_col]])),
     gene_raw = gene_raw
   ) %>%
-    .[
-      chr %in% standard_chr &
-        is.finite(start) &
-        is.finite(end) &
-        end > start &
-        !is.na(gene_raw) &
-        gene_raw != ""
-    ] %>%
-    .[
-      ,
-      enhancer_len := end - start
-    ]
+    filter(
+      chr %in% standard_chr,
+      is.finite(start),
+      is.finite(end),
+      end > start,
+      !is.na(gene_raw),
+      gene_raw != ""
+    ) %>%
+    mutate(enhancer_len = end - start)
 
   if (gene_is_ensg) {
     link_dt <- link_dt %>%
-      .[
-        ,
-        gene_id_clean := strip_gene_version(gene_raw)
-      ] %>%
-      merge(gene_lookup_id_dt, by = "gene_id_clean", all = FALSE)
+      mutate(gene_id_clean = strip_gene_version(gene_raw)) %>%
+      inner_join(as_tibble(gene_lookup_id_dt), by = "gene_id_clean")
   } else {
     link_dt <- link_dt %>%
-      .[
-        ,
-        gene_name := gene_raw
-      ] %>%
-      merge(gene_lookup_name_dt, by = "gene_name", all = FALSE)
+      mutate(gene_name = gene_raw) %>%
+      inner_join(as_tibble(gene_lookup_name_dt), by = "gene_name")
   }
 
   link_dt %>%
-    .[
-      ,
-      biosample := biosample
-    ] %>%
-    .[
-      ,
-      .(gene_id_clean, biosample, chr, start, end, enhancer_len)
-    ]
+    mutate(biosample = biosample) %>%
+    select(gene_id_clean, biosample, chr, start, end, enhancer_len) %>%
+    as.data.table()
 }
 
 build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
-  gene_lookup_name_dt <- gene_tbl %>%
-    .[
-      !is.na(gene_name) & gene_name != "",
-      .(gene_name, gene_id_clean)
-    ] %>%
-    .[
-      ,
-      .(
-        n_gene_ids = uniqueN(gene_id_clean),
-        gene_id_clean = first(gene_id_clean)
-      ),
-      by = gene_name
-    ] %>%
-    .[
-      n_gene_ids == 1,
-      .(gene_name, gene_id_clean)
-    ]
-  gene_lookup_id_dt <- gene_tbl %>%
-    .[
-      !is.na(gene_id_clean) & gene_id_clean != "",
-      .(gene_id_clean)
-    ] %>%
-    unique()
+  gene_tbl_tbl <- gene_tbl %>% as_tibble()
+
+  gene_lookup_name_dt <- gene_tbl_tbl %>%
+    filter(!is.na(gene_name), gene_name != "") %>%
+    group_by(gene_name) %>%
+    summarise(
+      n_gene_ids = n_distinct(gene_id_clean),
+      gene_id_clean = first(gene_id_clean),
+      .groups = "drop"
+    ) %>%
+    filter(n_gene_ids == 1) %>%
+    select(gene_name, gene_id_clean) %>%
+    as.data.table()
+
+  gene_lookup_id_dt <- gene_tbl_tbl %>%
+    filter(!is.na(gene_id_clean), gene_id_clean != "") %>%
+    distinct(gene_id_clean) %>%
+    as.data.table()
 
   if (nrow(gene_lookup_id_dt) == 0L) {
     stop("No gene_id mapping available for Roadmap enhancer links.")
   }
 
   per_link <- roadmap_files %>%
-    lapply(function(f) {
+    map_dfr(function(f) {
       message("Reading Roadmap links: ", basename(f))
       extract_roadmap_links(
         path = f,
         gene_lookup_name_dt = gene_lookup_name_dt,
         gene_lookup_id_dt = gene_lookup_id_dt
       )
-    }) %>%
-    rbindlist(fill = TRUE)
+    })
 
-  out <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
-    unique(by = "gene_id_clean")
+  out <- tibble(gene_id_clean = gene_tbl_tbl$gene_id_clean) %>%
+    distinct(gene_id_clean)
 
   if (nrow(per_link) == 0L) {
-    out[, `:=`(
-      enh_link_active_biosample_n = 0,
-      enh_link_mean_count_active = 0,
-      enh_link_mean_total_bp_active = 0
-    )]
-    return(out)
+    return(out %>%
+      mutate(
+        enh_link_active_biosample_n = 0,
+        enh_link_mean_count_active = 0,
+        enh_link_mean_total_bp_active = 0
+      ) %>%
+      as.data.table())
   }
 
   per_biosample <- per_link %>%
-    unique(by = c("gene_id_clean", "biosample", "chr", "start", "end")) %>%
-    .[
-      ,
-      .(
-        enh_link_n = .N,
-        enh_link_total_bp = sum(enhancer_len)
-      ),
-      by = .(gene_id_clean, biosample)
-    ]
+    distinct(gene_id_clean, biosample, chr, start, end, .keep_all = TRUE) %>%
+    group_by(gene_id_clean, biosample) %>%
+    summarise(
+      enh_link_n = n(),
+      enh_link_total_bp = sum(enhancer_len, na.rm = TRUE),
+      .groups = "drop"
+    )
 
   summary_dt <- per_biosample %>%
-    .[
-      enh_link_total_bp > 0
-    ] %>%
-    .[
-      ,
-      .(
-        enh_link_active_biosample_n = uniqueN(biosample),
-        enh_link_mean_count_active = mean(enh_link_n),
-        enh_link_mean_total_bp_active = mean(enh_link_total_bp)
-      ),
-      by = gene_id_clean
-    ]
+    filter(enh_link_total_bp > 0) %>%
+    group_by(gene_id_clean) %>%
+    summarise(
+      enh_link_active_biosample_n = n_distinct(biosample),
+      enh_link_mean_count_active = mean(enh_link_n, na.rm = TRUE),
+      enh_link_mean_total_bp_active = mean(enh_link_total_bp, na.rm = TRUE),
+      .groups = "drop"
+    )
 
   out %>%
-    merge(summary_dt, by = "gene_id_clean", all.x = TRUE) %>%
-    .[
-      ,
-      `:=`(
-        enh_link_active_biosample_n = fifelse(is.na(enh_link_active_biosample_n), 0, enh_link_active_biosample_n),
-        enh_link_mean_count_active = fifelse(is.na(enh_link_mean_count_active), 0, enh_link_mean_count_active),
-        enh_link_mean_total_bp_active = fifelse(is.na(enh_link_mean_total_bp_active), 0, enh_link_mean_total_bp_active)
+    left_join(summary_dt, by = "gene_id_clean") %>%
+    mutate(
+      across(
+        c(enh_link_active_biosample_n, enh_link_mean_count_active, enh_link_mean_total_bp_active),
+        ~ replace_na(.x, 0)
       )
-    ]
+    ) %>%
+    as.data.table()
 }
 
 build_window_enhancer_features <- function(
@@ -788,43 +760,31 @@ build_window_enhancer_features <- function(
     to_ucsc_style() %>%
     keep_standard_chr()
 
-  feature_dt <- count_overlaps_dt(gene_win_small, enh_gr, "enh_count_100kb") %>%
-    merge(
-      count_overlaps_dt(gene_win_cis, enh_gr, "enh_count_1mb"),
-      by = "gene_id_clean",
-      all = TRUE
-    ) %>%
-    merge(
-      count_overlaps_dt(tss_win_small, enh_gr, "enh_count_tss_100kb"),
-      by = "gene_id_clean",
-      all = TRUE
-    ) %>%
-    merge(
-      count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_tss_1mb"),
-      by = "gene_id_clean",
-      all = TRUE
-    ) %>%
-    merge(
-      data.table(
-        gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
-        enh_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, enh_gr, ignore.strand = TRUE)),
-        enh_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, enh_gr))
-      ),
-      by = "gene_id_clean",
-      all = TRUE
+  feature_dt <- list(
+    count_overlaps_dt(gene_win_small, enh_gr, "enh_count_100kb") %>% as_tibble(),
+    count_overlaps_dt(gene_win_cis, enh_gr, "enh_count_1mb") %>% as_tibble(),
+    count_overlaps_dt(tss_win_small, enh_gr, "enh_count_tss_100kb") %>% as_tibble(),
+    count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_tss_1mb") %>% as_tibble(),
+    tibble(
+      gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
+      enh_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, enh_gr, ignore.strand = TRUE)),
+      enh_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, enh_gr))
     )
+  ) %>%
+    reduce(left_join, by = "gene_id_clean") %>%
+    as.data.table()
 
   list(features = feature_dt, enhancer_gr = enh_gr)
 }
 
 build_log_terms <- function(dt, columns) {
   valid_cols <- columns %>%
-    .[. %in% names(dt)] %>%
-    .[vapply(., function(col) {
+    intersect(names(dt)) %>%
+    keep(function(col) {
       x <- dt[[col]]
       ok <- is.finite(x)
-      sum(ok) >= 5 && uniqueN(x[ok]) >= 2
-    }, logical(1))]
+      sum(ok) >= 5 && dplyr::n_distinct(x[ok]) >= 2
+    })
 
   sprintf("scale(log1p(`%s`))", valid_cols)
 }
@@ -854,7 +814,10 @@ if (!run_col %in% names(sdrf)) {
 }
 
 eur_runs <- sdrf %>%
-  .[get(ancestry_col) %in% cfg$eur_pops, unique(get(run_col))]
+  as_tibble() %>%
+  filter(.data[[ancestry_col]] %in% cfg$eur_pops) %>%
+  pull(.data[[run_col]]) %>%
+  unique()
 
 if (length(eur_runs) == 0L) {
   stop("No European runs found in SDRF with the configured population labels.")
@@ -875,27 +838,24 @@ clean_cols <- str_remove(all_cols, "_\\d+$")
 keep_cols <- all_cols[clean_cols %in% eur_runs | all_cols == gene_col]
 
 tpm_eur <- tpm %>%
-  .[, ..keep_cols] %>%
-  {
-    eur_sample_cols <- setdiff(names(.), gene_col)
+  as_tibble() %>%
+  select(all_of(keep_cols))
 
-    if (length(eur_sample_cols) == 0L) {
-      stop("No European sample columns matched TPM columns after cleaning suffixes.")
-    }
+eur_sample_cols <- setdiff(names(tpm_eur), gene_col)
+if (length(eur_sample_cols) == 0L) {
+  stop("No European sample columns matched TPM columns after cleaning suffixes.")
+}
 
-    .[, (eur_sample_cols) := lapply(.SD, as.numeric), .SDcols = eur_sample_cols]
+tpm_eur <- tpm_eur %>%
+  mutate(across(all_of(eur_sample_cols), as.numeric)) %>%
+  filter(if_any(all_of(eur_sample_cols), ~ .x > 0)) %>%
+  mutate(
+    gene_id_clean = strip_gene_version(.data[[gene_col]]),
+    mean_tpm = rowMeans(select(., all_of(eur_sample_cols)), na.rm = TRUE)
+  ) %>%
+  as.data.table()
 
-    keep_rows <- rowSums(as.matrix(.[, ..eur_sample_cols]) > 0, na.rm = TRUE) > 0
-    . <- .[keep_rows]
-
-    .[, gene_id_clean := strip_gene_version(get(gene_col))]
-    .[, mean_tpm := rowMeans(as.matrix(.SD), na.rm = TRUE), .SDcols = eur_sample_cols]
-
-    .
-  }
-
-expressing_gene_ids <- tpm_eur %>%
-  .[, unique(gene_id_clean)]
+expressing_gene_ids <- tpm_eur$gene_id_clean %>% unique()
 
 writeLines(expressing_gene_ids, con = file.path(cfg$output_dir, "non_zero_eur_gene_ids.txt"))
 
@@ -911,20 +871,19 @@ stop_if_missing(cfg$summary_tsv, "heritability summary TSV")
 stop_if_missing(cfg$shet_xlsx, "s_het xlsx")
 
 sum_dt <- fread(cfg$summary_tsv) %>%
-  .[, .(Gene, h2_GREML, SE_GREML, Pval_GREML)] %>%
-  .[, gene_id_clean := strip_gene_version(Gene)] %>%
-  .[]
+  as_tibble() %>%
+  select(Gene, h2_GREML, SE_GREML, Pval_GREML) %>%
+  mutate(gene_id_clean = strip_gene_version(Gene))
 
 shet_dt <- read_xlsx(cfg$shet_xlsx, sheet = cfg$shet_sheet) %>%
-  as.data.table() %>%
-  {
-    if (!all(c("ensg", "post_mean") %in% names(.))) {
-      stop("s_het sheet must include columns named 'ensg' and 'post_mean'.")
-    }
+  as_tibble()
 
-    .[, gene_id_clean := strip_gene_version(ensg)]
-    .
-  }
+if (!all(c("ensg", "post_mean") %in% names(shet_dt))) {
+  stop("s_het sheet must include columns named 'ensg' and 'post_mean'.")
+}
+
+shet_dt <- shet_dt %>%
+  mutate(gene_id_clean = strip_gene_version(ensg))
 
 shet_coord_cols <- detect_shet_coord_columns(shet_dt)
 shet_coord_dt <- NULL
@@ -933,33 +892,31 @@ if (
     !is.na(shet_coord_cols$start_col) &&
     !is.na(shet_coord_cols$end_col)
 ) {
-  shet_coord_dt <- data.table(
-    gene_id_clean = shet_dt$gene_id_clean,
-    chr_shet = normalize_chr(shet_dt[[shet_coord_cols$chr_col]]),
-    start_shet = suppressWarnings(as.numeric(shet_dt[[shet_coord_cols$start_col]])),
-    end_shet = suppressWarnings(as.numeric(shet_dt[[shet_coord_cols$end_col]])),
-    gene_name_shet = if (!is.na(shet_coord_cols$gene_name_col)) {
-      as.character(shet_dt[[shet_coord_cols$gene_name_col]])
-    } else {
-      NA_character_
-    }
-  ) %>%
-    .[
-      !is.na(gene_id_clean) &
-        gene_id_clean != "" &
-        chr_shet %in% standard_chr &
-        is.finite(start_shet) &
-        is.finite(end_shet) &
-        end_shet > start_shet
-    ] %>%
-    .[
-      ,
-      `:=`(
-        start_shet = as.integer(start_shet),
-        end_shet = as.integer(end_shet)
-      )
-    ] %>%
-    unique(by = "gene_id_clean")
+  shet_coord_dt <- shet_dt %>%
+    transmute(
+      gene_id_clean = gene_id_clean,
+      chr_shet = normalize_chr(.data[[shet_coord_cols$chr_col]]),
+      start_shet = suppressWarnings(as.numeric(.data[[shet_coord_cols$start_col]])),
+      end_shet = suppressWarnings(as.numeric(.data[[shet_coord_cols$end_col]])),
+      gene_name_shet = if (!is.na(shet_coord_cols$gene_name_col)) {
+        as.character(.data[[shet_coord_cols$gene_name_col]])
+      } else {
+        NA_character_
+      }
+    ) %>%
+    filter(
+      !is.na(gene_id_clean),
+      gene_id_clean != "",
+      chr_shet %in% standard_chr,
+      is.finite(start_shet),
+      is.finite(end_shet),
+      end_shet > start_shet
+    ) %>%
+    mutate(
+      start_shet = as.integer(start_shet),
+      end_shet = as.integer(end_shet)
+    ) %>%
+    distinct(gene_id_clean, .keep_all = TRUE)
 
   message("Using S_het coordinates for ", nrow(shet_coord_dt), " genes when available.")
 } else {
@@ -967,27 +924,21 @@ if (
 }
 
 merged <- sum_dt %>%
-  merge(
-    shet_dt[, .(gene_id_clean, post_mean)],
-    by = "gene_id_clean",
-    all.x = TRUE
-  ) %>%
-  .[!is.na(post_mean) & gene_id_clean %in% expressing_gene_ids] %>%
-  {
-    .[, post_mean_bin := dplyr::ntile(post_mean, 10L)]
-    .
-  }
+  left_join(select(shet_dt, gene_id_clean, post_mean), by = "gene_id_clean") %>%
+  filter(!is.na(post_mean), gene_id_clean %in% expressing_gene_ids) %>%
+  mutate(post_mean_bin = dplyr::ntile(post_mean, 10L))
 
 if (nrow(merged) == 0L) {
   stop("No genes left after merging h2 + s_het and applying EU non-zero filter.")
 }
 
 tpm_means <- tpm_eur %>%
-  .[, .(gene_id_clean, mean_tpm)] %>%
-  unique(by = "gene_id_clean")
+  as_tibble() %>%
+  select(gene_id_clean, mean_tpm) %>%
+  distinct(gene_id_clean, .keep_all = TRUE)
 
 merged <- merged %>%
-  merge(tpm_means, by = "gene_id_clean", all.x = TRUE)
+  left_join(tpm_means, by = "gene_id_clean")
 
 # ----------------------- 3) GENE COORDINATES / WINDOWS ------------------------
 message("Step 4: load gene annotation and build gene/TSS windows")
@@ -1008,7 +959,7 @@ gene_gr <- gtf[gtf$type == "gene"] %>%
   keepStandardChromosomes(pruning.mode = "coarse") %>%
   to_ucsc_style()
 
-gene_tbl <- data.table(
+gene_tbl <- tibble(
   gene_id_clean = strip_gene_version(mcols(gene_gr)$gene_id),
   chr = as.character(seqnames(gene_gr)),
   start = start(gene_gr),
@@ -1021,47 +972,34 @@ gene_tbl <- data.table(
   },
   gene_length = width(gene_gr)
 ) %>%
-  unique(by = "gene_id_clean") %>%
-  .[gene_id_clean %in% merged$gene_id_clean]
+  distinct(gene_id_clean, .keep_all = TRUE) %>%
+  filter(gene_id_clean %in% merged$gene_id_clean)
 
 if (!is.null(shet_coord_dt) && nrow(shet_coord_dt) > 0L) {
-  gene_tbl <- merge(
-    gene_tbl,
-    shet_coord_dt,
-    by = "gene_id_clean",
-    all = TRUE
-  ) %>%
-    .[
-      ,
-      `:=`(
-        chr = fifelse(!is.na(chr_shet), chr_shet, chr),
-        start = as.integer(fifelse(is.finite(start_shet), start_shet, start)),
-        end = as.integer(fifelse(is.finite(end_shet), end_shet, end)),
-        gene_name = fifelse(
-          "gene_name_shet" %in% names(.) & !is.na(gene_name_shet) & gene_name_shet != "",
-          gene_name_shet,
-          gene_name
-        ),
-        strand = fifelse(is.na(strand) | strand == "", "+", strand)
-      )
-    ] %>%
-    .[
-      ,
-      gene_length := as.integer(end - start + 1L)
-    ] %>%
-    .[
-      !is.na(gene_id_clean) &
-        gene_id_clean %in% merged$gene_id_clean &
-        chr %in% standard_chr &
-        is.finite(start) &
-        is.finite(end) &
-        end > start
-    ] %>%
-    .[
-      ,
-      c("chr_shet", "start_shet", "end_shet", "gene_name_shet") := NULL
-    ] %>%
-    unique(by = "gene_id_clean")
+  gene_tbl <- gene_tbl %>%
+    full_join(shet_coord_dt, by = "gene_id_clean") %>%
+    mutate(
+      chr = coalesce(chr_shet, chr),
+      start = if_else(is.finite(start_shet), as.integer(start_shet), as.integer(start)),
+      end = if_else(is.finite(end_shet), as.integer(end_shet), as.integer(end)),
+      gene_name = if_else(
+        !is.na(gene_name_shet) & gene_name_shet != "",
+        gene_name_shet,
+        gene_name
+      ),
+      strand = if_else(is.na(strand) | strand == "", "+", strand),
+      gene_length = as.integer(end - start + 1L)
+    ) %>%
+    filter(
+      !is.na(gene_id_clean),
+      gene_id_clean %in% merged$gene_id_clean,
+      chr %in% standard_chr,
+      is.finite(start),
+      is.finite(end),
+      end > start
+    ) %>%
+    select(-any_of(c("chr_shet", "start_shet", "end_shet", "gene_name_shet"))) %>%
+    distinct(gene_id_clean, .keep_all = TRUE)
 }
 
 if (nrow(gene_tbl) == 0L) {
@@ -1093,8 +1031,9 @@ gene_win_cis <- expand_interval_window(gene_body_gr, cfg$cis_window_bp)
 # ----------------------- 4) REGULATORY FEATURE COUNTS -------------------------
 message("Step 5: build enhancer and open-chromatin features")
 
-reg_features <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
-  unique(by = "gene_id_clean")
+reg_features <- gene_tbl %>%
+  select(gene_id_clean) %>%
+  distinct(gene_id_clean)
 
 enh_window_obj <- build_window_enhancer_features(
   cfg = cfg,
@@ -1122,20 +1061,20 @@ if (identical(cfg$enhancer_source, "roadmap_links")) {
       message("Roadmap enhancer mode failed: ", conditionMessage(e))
       if (identical(cfg$enhancer_fallback_source, "window_count")) {
         message("Falling back to fixed-window enhancer features only (no Roadmap-linked features).")
-        return(data.table(gene_id_clean = reg_features$gene_id_clean) %>% unique(by = "gene_id_clean"))
+        return(reg_features %>% as.data.table())
       }
       stop(e)
     }
   )
 
   reg_features <- reg_features %>%
-    merge(enh_count_features, by = "gene_id_clean", all.x = TRUE) %>%
-    merge(enh_features, by = "gene_id_clean", all.x = TRUE)
+    left_join(as_tibble(enh_count_features), by = "gene_id_clean") %>%
+    left_join(as_tibble(enh_features), by = "gene_id_clean")
 } else if (identical(cfg$enhancer_source, "window_count")) {
   message("Enhancer mode: fixed-window counts around gene body and TSS.")
 
   reg_features <- reg_features %>%
-    merge(enh_count_features, by = "gene_id_clean", all.x = TRUE)
+    left_join(as_tibble(enh_count_features), by = "gene_id_clean")
 } else {
   stop("Unknown cfg$enhancer_source: ", cfg$enhancer_source)
 }
@@ -1152,34 +1091,21 @@ open_gr <- import_bed_like(open_path, label = "open-chromatin annotations") %>%
   to_ucsc_style() %>%
   keep_standard_chr()
 
-open_features <- count_overlaps_dt(gene_win_small, open_gr, "open_count_100kb") %>%
-  merge(
-    count_overlaps_dt(gene_win_cis, open_gr, "open_count_1mb"),
-    by = "gene_id_clean",
-    all = TRUE
-  ) %>%
-  merge(
-    count_overlaps_dt(tss_win_small, open_gr, "open_count_tss_100kb"),
-    by = "gene_id_clean",
-    all = TRUE
-  ) %>%
-  merge(
-    count_overlaps_dt(tss_win_cis, open_gr, "open_count_tss_1mb"),
-    by = "gene_id_clean",
-    all = TRUE
-  ) %>%
-  merge(
-    data.table(
-      gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
-      open_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, open_gr, ignore.strand = TRUE)),
-      open_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, open_gr))
-    ),
-    by = "gene_id_clean",
-    all = TRUE
+open_features <- list(
+  count_overlaps_dt(gene_win_small, open_gr, "open_count_100kb") %>% as_tibble(),
+  count_overlaps_dt(gene_win_cis, open_gr, "open_count_1mb") %>% as_tibble(),
+  count_overlaps_dt(tss_win_small, open_gr, "open_count_tss_100kb") %>% as_tibble(),
+  count_overlaps_dt(tss_win_cis, open_gr, "open_count_tss_1mb") %>% as_tibble(),
+  tibble(
+    gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
+    open_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, open_gr, ignore.strand = TRUE)),
+    open_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, open_gr))
   )
+) %>%
+  reduce(left_join, by = "gene_id_clean")
 
 reg_features <- reg_features %>%
-  merge(open_features, by = "gene_id_clean", all.x = TRUE)
+  left_join(open_features, by = "gene_id_clean")
 
 # ------------------------ 5) UCSC REPEATMASKER COUNTS -------------------------
 message("Step 6: load UCSC RepeatMasker annotations and summarize repeats")
@@ -1197,22 +1123,19 @@ if (ncol(rmsk) < 17L) {
   stop("Unexpected rmsk format. Expected at least 17 columns.")
 }
 
-setnames(
-  rmsk,
-  old = names(rmsk)[1:17],
-  new = c(
-    "bin", "swScore", "milliDiv", "milliDel", "milliIns", "genoName", "genoStart",
-    "genoEnd", "genoLeft", "strand", "repName", "repClass", "repFamily",
-    "repStart", "repEnd", "repLeft", "id"
-  )
+names(rmsk)[1:17] <- c(
+  "bin", "swScore", "milliDiv", "milliDel", "milliIns", "genoName", "genoStart",
+  "genoEnd", "genoLeft", "strand", "repName", "repClass", "repFamily",
+  "repStart", "repEnd", "repLeft", "id"
 )
 
 rmsk <- rmsk %>%
-  .[
-    genoName %in% paste0("chr", c(1:22, "X", "Y")) &
-      !is.na(repClass) &
-      genoEnd > genoStart
-  ]
+  as_tibble() %>%
+  filter(
+    genoName %in% paste0("chr", c(1:22, "X", "Y")),
+    !is.na(repClass),
+    genoEnd > genoStart
+  )
 
 rep_gr <- GRanges(
   seqnames = rmsk$genoName,
@@ -1246,7 +1169,7 @@ repeat_class_obj <- count_and_bp_by_group(
   prefix = "repeat_class",
   suffix = "_100kb"
 )
-repeat_class_dt <- repeat_class_obj$table
+repeat_class_dt <- repeat_class_obj$table %>% as_tibble()
 
 repeat_count_class_cols <- names(repeat_class_dt) %>%
   str_subset("^repeat_class_.*_count_100kb$")
@@ -1254,71 +1177,79 @@ repeat_bp_class_cols <- names(repeat_class_dt) %>%
   str_subset("^repeat_class_.*_bp_100kb$")
 
 if (length(repeat_count_class_cols) > 0L) {
-  count_mat <- as.matrix(repeat_class_dt[, ..repeat_count_class_cols])
+  count_mat <- repeat_class_dt %>%
+    select(all_of(repeat_count_class_cols)) %>%
+    as.matrix()
   bp_mat <- if (length(repeat_bp_class_cols) > 0L) {
-    as.matrix(repeat_class_dt[, ..repeat_bp_class_cols])
+    repeat_class_dt %>%
+      select(all_of(repeat_bp_class_cols)) %>%
+      as.matrix()
   } else {
     matrix(0, nrow = nrow(repeat_class_dt), ncol = length(repeat_count_class_cols))
   }
   active_mat <- count_mat > 0
   active_n <- rowSums(active_mat, na.rm = TRUE)
 
-  repeat_class_dt[, repeat_active_class_n_100kb := active_n]
-  repeat_class_dt[, repeat_mean_bp_active_class_100kb := fifelse(
-    active_n > 0,
-    rowSums(bp_mat * active_mat, na.rm = TRUE) / active_n,
-    0
-  )]
-  repeat_class_dt[, repeat_mean_count_active_class_100kb := fifelse(
-    active_n > 0,
-    rowSums(count_mat * active_mat, na.rm = TRUE) / active_n,
-    0
-  )]
+  repeat_class_dt <- repeat_class_dt %>%
+    mutate(
+      repeat_active_class_n_100kb = active_n,
+      repeat_mean_bp_active_class_100kb = if_else(
+        active_n > 0,
+        rowSums(bp_mat * active_mat, na.rm = TRUE) / active_n,
+        0
+      ),
+      repeat_mean_count_active_class_100kb = if_else(
+        active_n > 0,
+        rowSums(count_mat * active_mat, na.rm = TRUE) / active_n,
+        0
+      )
+    )
 } else {
-  repeat_class_dt[, `:=`(
-    repeat_active_class_n_100kb = 0,
-    repeat_mean_bp_active_class_100kb = 0,
-    repeat_mean_count_active_class_100kb = 0
-  )]
+  repeat_class_dt <- repeat_class_dt %>%
+    mutate(
+      repeat_active_class_n_100kb = 0,
+      repeat_mean_bp_active_class_100kb = 0,
+      repeat_mean_count_active_class_100kb = 0
+    )
 }
 
 for (cls in c("LINE", "SINE", "LTR", "DNA")) {
   count_col <- paste0("repeat_class_", cls, "_count_100kb")
   bp_col <- paste0("repeat_class_", cls, "_bp_100kb")
   if (!count_col %in% names(repeat_class_dt)) {
-    repeat_class_dt[, (count_col) := 0]
+    repeat_class_dt <- repeat_class_dt %>%
+      mutate(!!count_col := 0)
   }
   if (!bp_col %in% names(repeat_class_dt)) {
-    repeat_class_dt[, (bp_col) := 0]
+    repeat_class_dt <- repeat_class_dt %>%
+      mutate(!!bp_col := 0)
   }
 }
 
 # --------------------------- 6) FINAL ANALYSIS TABLE --------------------------
 analysis_dt <- merged %>%
-  merge(
-    gene_tbl[, .(gene_id_clean, gene_name, chr, start, end, gene_length)],
-    by = "gene_id_clean",
-    all.x = TRUE
+  left_join(
+    gene_tbl %>% select(gene_id_clean, gene_name, chr, start, end, gene_length),
+    by = "gene_id_clean"
   ) %>%
-  merge(reg_features, by = "gene_id_clean", all.x = TRUE) %>%
-  merge(repeat_features, by = "gene_id_clean", all.x = TRUE) %>%
-  merge(repeat_class_dt, by = "gene_id_clean", all.x = TRUE)
+  left_join(reg_features, by = "gene_id_clean") %>%
+  left_join(as_tibble(repeat_features), by = "gene_id_clean") %>%
+  left_join(repeat_class_dt, by = "gene_id_clean")
 
 count_cols <- names(analysis_dt) %>%
   str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_bp_|repeat_overlap_|repeat_class_)")
 
 if (length(count_cols) > 0L) {
-  analysis_dt[, (count_cols) := lapply(
-    .SD,
-    function(x) {
-      x <- as.numeric(x)
-      x[is.na(x)] <- 0
-      x
-    }
-  ), .SDcols = count_cols]
+  analysis_dt <- analysis_dt %>%
+    mutate(
+      across(
+        all_of(count_cols),
+        ~ replace_na(as.numeric(.x), 0)
+      )
+    )
 }
 
-fwrite(analysis_dt, file.path(cfg$output_dir, "gene_level_features.tsv"), sep = "\t")
+fwrite(as.data.table(analysis_dt), file.path(cfg$output_dir, "gene_level_features.tsv"), sep = "\t")
 
 # ----------------------------- 7) SUMMARIES -----------------------------------
 expected_feature_cols <- c(
@@ -1355,41 +1286,35 @@ expected_feature_cols <- c(
   "repeat_class_LINE_bp_100kb",
   "repeat_class_SINE_bp_100kb"
 )
-for (col in expected_feature_cols) {
-  if (!col %in% names(analysis_dt)) {
-    analysis_dt[, (col) := 0]
-  }
-}
+analysis_dt <- add_missing_numeric_cols(analysis_dt, expected_feature_cols, default_value = 0)
 
 decile_summary <- analysis_dt %>%
-  .[
-    ,
-    .(
-      n_genes = .N,
-      median_h2 = median(h2_GREML, na.rm = TRUE),
-      prop_h2_sig = mean(Pval_GREML < 0.05, na.rm = TRUE),
-      median_enh_active_biosample_n = median(enh_link_active_biosample_n, na.rm = TRUE),
-      median_enh_mean_count_active = median(enh_link_mean_count_active, na.rm = TRUE),
-      median_enh_mean_bp_active = median(enh_link_mean_total_bp_active, na.rm = TRUE),
-      median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
-      median_enh_1mb = median(enh_count_1mb, na.rm = TRUE),
-      median_enh_overlap_gene_body_n = median(enh_overlap_gene_body_n, na.rm = TRUE),
-      median_open_100kb = median(open_count_100kb, na.rm = TRUE),
-      median_open_1mb = median(open_count_1mb, na.rm = TRUE),
-      median_open_overlap_gene_body_n = median(open_overlap_gene_body_n, na.rm = TRUE),
-      median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE),
-      median_repeat_1mb = median(repeat_count_1mb, na.rm = TRUE),
-      median_repeat_bp_100kb = median(repeat_bp_100kb, na.rm = TRUE),
-      median_repeat_overlap_gene_body_n = median(repeat_overlap_gene_body_n, na.rm = TRUE),
-      median_repeat_active_class_n_100kb = median(repeat_active_class_n_100kb, na.rm = TRUE),
-      median_repeat_LINE_count_100kb = median(repeat_class_LINE_count_100kb, na.rm = TRUE),
-      median_repeat_SINE_count_100kb = median(repeat_class_SINE_count_100kb, na.rm = TRUE)
-    ),
-    by = post_mean_bin
-  ] %>%
-  .[order(post_mean_bin)]
+  group_by(post_mean_bin) %>%
+  summarise(
+    n_genes = n(),
+    median_h2 = median(h2_GREML, na.rm = TRUE),
+    prop_h2_sig = mean(Pval_GREML < 0.05, na.rm = TRUE),
+    median_enh_active_biosample_n = median(enh_link_active_biosample_n, na.rm = TRUE),
+    median_enh_mean_count_active = median(enh_link_mean_count_active, na.rm = TRUE),
+    median_enh_mean_bp_active = median(enh_link_mean_total_bp_active, na.rm = TRUE),
+    median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
+    median_enh_1mb = median(enh_count_1mb, na.rm = TRUE),
+    median_enh_overlap_gene_body_n = median(enh_overlap_gene_body_n, na.rm = TRUE),
+    median_open_100kb = median(open_count_100kb, na.rm = TRUE),
+    median_open_1mb = median(open_count_1mb, na.rm = TRUE),
+    median_open_overlap_gene_body_n = median(open_overlap_gene_body_n, na.rm = TRUE),
+    median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE),
+    median_repeat_1mb = median(repeat_count_1mb, na.rm = TRUE),
+    median_repeat_bp_100kb = median(repeat_bp_100kb, na.rm = TRUE),
+    median_repeat_overlap_gene_body_n = median(repeat_overlap_gene_body_n, na.rm = TRUE),
+    median_repeat_active_class_n_100kb = median(repeat_active_class_n_100kb, na.rm = TRUE),
+    median_repeat_LINE_count_100kb = median(repeat_class_LINE_count_100kb, na.rm = TRUE),
+    median_repeat_SINE_count_100kb = median(repeat_class_SINE_count_100kb, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  arrange(post_mean_bin)
 
-fwrite(decile_summary, file.path(cfg$output_dir, "decile_feature_summary.tsv"), sep = "\t")
+fwrite(as.data.table(decile_summary), file.path(cfg$output_dir, "decile_feature_summary.tsv"), sep = "\t")
 
 cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$h2_GREML, "post_mean", "h2_GREML"),
@@ -1421,38 +1346,34 @@ overlap_cols <- c(
   "enh_overlap_gene_body_n",
   "open_overlap_gene_body_n",
   "repeat_overlap_gene_body_n"
-) %>%
-  .[. %in% names(analysis_dt)]
+)
+overlap_cols <- overlap_cols[overlap_cols %in% names(analysis_dt)]
 
 if (length(overlap_cols) > 0L) {
-  overlap_summary <- data.table(feature = overlap_cols) %>%
-    .[
-      ,
-      `:=`(
-        n_genes_with_overlap = vapply(feature, function(col) sum(analysis_dt[[col]] > 0, na.rm = TRUE), numeric(1)),
-        prop_genes_with_overlap = vapply(feature, function(col) mean(analysis_dt[[col]] > 0, na.rm = TRUE), numeric(1)),
-        median_overlap_count = vapply(feature, function(col) median(analysis_dt[[col]], na.rm = TRUE), numeric(1))
-      )
-    ]
-  fwrite(overlap_summary, file.path(cfg$output_dir, "gene_body_overlap_summary.tsv"), sep = "\t")
+  overlap_summary <- tibble(feature = overlap_cols) %>%
+    mutate(
+      n_genes_with_overlap = vapply(feature, function(col) sum(analysis_dt[[col]] > 0, na.rm = TRUE), numeric(1)),
+      prop_genes_with_overlap = vapply(feature, function(col) mean(analysis_dt[[col]] > 0, na.rm = TRUE), numeric(1)),
+      median_overlap_count = vapply(feature, function(col) median(analysis_dt[[col]], na.rm = TRUE), numeric(1))
+    )
+  fwrite(as.data.table(overlap_summary), file.path(cfg$output_dir, "gene_body_overlap_summary.tsv"), sep = "\t")
 }
 
 # --------------------------- 8) ASSOCIATION MODELS ----------------------------
 model_dt <- analysis_dt %>%
-  .[
-    is.finite(h2_GREML) &
-      is.finite(post_mean) &
-      is.finite(mean_tpm) &
-      is.finite(gene_length)
-  ] %>%
-  {
-    .[, h2_sig := as.integer(Pval_GREML < 0.05)]
-    .
-  }
+  filter(
+    is.finite(h2_GREML),
+    is.finite(post_mean),
+    is.finite(mean_tpm),
+    is.finite(gene_length)
+  ) %>%
+  mutate(h2_sig = as.integer(Pval_GREML < 0.05))
 
 post_mean_term <- NULL
 post_mean_levels <- model_dt %>%
-  .[, uniqueN(post_mean_bin[!is.na(post_mean_bin)])]
+  pull(post_mean_bin) %>%
+  discard(is.na) %>%
+  dplyr::n_distinct()
 if (post_mean_levels >= 2L) {
   post_mean_term <- "factor(post_mean_bin)"
 } else {
@@ -1486,7 +1407,7 @@ lm_terms <- c(
   numeric_terms,
   post_mean_term
 ) %>%
-  .[!is.na(.) & nzchar(.)]
+  discard(~ is.na(.x) || !nzchar(.x))
 
 lm_formula <- as.formula(
   paste("h2_GREML ~", paste(lm_terms, collapse = " + "))
@@ -1503,7 +1424,7 @@ glm_terms <- c(
   numeric_terms,
   post_mean_term
 ) %>%
-  .[!is.na(.) & nzchar(.)]
+  discard(~ is.na(.x) || !nzchar(.x))
 
 glm_formula <- as.formula(
   paste("h2_sig ~", paste(glm_terms, collapse = " + "))
@@ -1520,28 +1441,19 @@ repeat_cols <- names(model_dt) %>%
   str_subset("^repeat_class_.*_count_100kb$")
 
 if (length(repeat_cols) > 0L) {
-  repeat_stats <- data.table(repeat_col = repeat_cols) %>%
-    .[
-      ,
-      `:=`(
-        total = vapply(repeat_col, function(col) sum(model_dt[[col]], na.rm = TRUE), numeric(1)),
-        n_unique = vapply(
-          repeat_col,
-          function(col) uniqueN(model_dt[[col]][!is.na(model_dt[[col]])]),
-          integer(1)
-        )
-      )
-    ]
+  repeat_stats <- tibble(repeat_col = repeat_cols) %>%
+    mutate(
+      total = map_dbl(repeat_col, ~ sum(model_dt[[.x]], na.rm = TRUE)),
+      n_unique = map_int(repeat_col, ~ n_distinct(model_dt[[.x]][!is.na(model_dt[[.x]])]))
+    )
 
   top_repeat_cols <- repeat_stats %>%
-    .[total > 0 & n_unique > 1] %>%
-    .[order(-total)] %>%
-    head(6) %>%
-    .[, as.character(repeat_col)]
-
-  top_repeat_cols <- top_repeat_cols %>%
-    .[!is.na(.) & nzchar(.)] %>%
-    .[. %in% names(model_dt)]
+    filter(total > 0, n_unique > 1) %>%
+    arrange(desc(total)) %>%
+    slice_head(n = 6) %>%
+    pull(repeat_col)
+  top_repeat_cols <- top_repeat_cols[!is.na(top_repeat_cols) & nzchar(top_repeat_cols)]
+  top_repeat_cols <- top_repeat_cols[top_repeat_cols %in% names(model_dt)]
 
   if (length(top_repeat_cols) == 0L) {
     message("Skipping repeat-class lm: no valid repeat_class predictors with variation.")
@@ -1552,7 +1464,7 @@ if (length(repeat_cols) > 0L) {
       "scale(log1p(gene_length))",
       post_mean_term
     ) %>%
-      .[!is.na(.) & nzchar(.)]
+      discard(~ is.na(.x) || !nzchar(.x))
 
     rhs <- repeat_terms %>%
       paste(collapse = " + ")
@@ -1594,8 +1506,8 @@ reg_plot_cols <- c(
   "enh_link_mean_count_active",
   "enh_count_100kb",
   "open_count_100kb"
-) %>%
-  .[. %in% names(analysis_dt)]
+)
+reg_plot_cols <- reg_plot_cols[reg_plot_cols %in% names(analysis_dt)]
 
 if (length(reg_plot_cols) > 0L) {
   p_reg <- analysis_dt %>%
