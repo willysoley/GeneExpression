@@ -57,6 +57,10 @@ In `results/downstream_h2_regulatory_repeat/`:
 - `plots/repeat_class_heatmap.pdf`
 
 Interpretation note:
-- `repeat_count_100kb`, `repeat_count_1mb`, and `repeat_class_*` are counts of repeat intervals within fixed TSS-centered windows, not indicators of whether the gene body overlaps repeats.
+- Primary `*_100kb` and `*_1mb` counts are computed in gene-centered windows (expanded from gene start/end), not just at TSS.
+- These are nearby-region burden counts (independent of direct gene-body overlap).
+- TSS-window versions are exported with `_tss_` in the column name (for comparison).
+- `repeat_count_100kb`, `repeat_count_1mb`, and `repeat_class_*` are counts of repeat intervals in those windows.
 - `enh_link_active_biosample_n` and `enh_link_mean_total_bp_active` are paper-style enhancer features from linked enhancer-gene maps (Mostafavi et al. 2023 / Liu et al. links), not fixed-window enhancer overlaps.
 - `repeat_class_LINE_*` and `repeat_class_SINE_*` provide subtype-specific repeat burden features.
+- Gene-body overlap is analyzed separately via `*_overlap_gene_body_*` outputs and `gene_body_overlap_summary.tsv`.

@@ -21,14 +21,19 @@ This note documents the data sources and analysis design used in:
 
 3. **UCSC RepeatMasker (`rmsk`)**
 - Standard genome-wide repeat annotation used in many repeat/transposon analyses.
-- Used here to compute repeat burden near gene TSS by total count and class-specific count.
-- Clarification: repeat features are defined as **counts of repeat intervals inside fixed windows around each gene TSS** (for example, +/-100 kb and +/-1 Mb), not whether the gene body itself overlaps a repeat.
+- Used here to compute repeat burden near each gene by total count and class-specific count.
+- Clarification: repeat features are defined as **counts of repeat intervals inside fixed windows around each gene interval** (gene start to gene end, expanded by +/-100 kb or +/-1 Mb), not only TSS windows.
+- Gene-body overlap with repeats is exported separately as an endpoint (`repeat_overlap_gene_body_*`).
 
 4. **GEUVADIS SDRF + TPM matrix**
 - European run filtering from SDRF, then keep genes with TPM > 0 in at least one European sample.
 
 5. **Cis-window conventions**
-- The script computes both +/-100 kb (local promoter-proximal) and +/-1 Mb (typical cis-regulatory window) feature counts.
+- Primary analysis computes both +/-100 kb and +/-1 Mb windows around the **gene interval** (`gene_start` to `gene_end`).
+- TSS-centered windows are also exported as auxiliary features for comparison.
+- Coordinate source priority:
+  1. S_het sheet coordinates (if present)
+  2. GENCODE gene coordinates (fallback)
 
 ## Method choices mirrored from common practice
 
@@ -39,12 +44,20 @@ This note documents the data sources and analysis design used in:
 - Default enhancer mode replicates Mostafavi et al. 2023:
   - enhancer-gene links from Roadmap links (Liu et al.)
   - `active biosample count` and `mean total enhancer length across active biosamples` per gene
-- Open-chromatin remains fixed-window burden by default (`open_count_100kb` and `open_count_1mb`).
+- Enhancer/open fixed-window burdens are computed around gene intervals (gene start/end expanded by flank):
+  - `enh_count_100kb`, `enh_count_1mb`
+  - `open_count_100kb`, `open_count_1mb`
+- TSS-window analogs are exported as secondary features:
+  - `enh_count_tss_100kb`, `enh_count_tss_1mb`
+  - `open_count_tss_100kb`, `open_count_tss_1mb`
+- Additional overlap endpoint:
+  - `enh_overlap_gene_body_n`, `open_overlap_gene_body_n`
 
 3. **Repeat classes**
-- Aggregate repeat counts and repeat base-pair burden by `repClass` (LINE, SINE, LTR, DNA, etc.) within TSS windows and model class-specific associations with heritability.
+- Aggregate repeat counts and repeat base-pair burden by `repClass` (LINE, SINE, LTR, DNA, etc.) within gene-interval windows and model class-specific associations with heritability.
 - Additional subtype-focused features are exported explicitly for `LINE` and `SINE`.
-- The analysis does **not** test a binary gene-body overlap with repeats.
+- Separate overlap endpoint is also reported:
+  - `repeat_overlap_gene_body_n` and `repeat_overlap_gene_body_bp`
 
 ## Primary sources / links
 

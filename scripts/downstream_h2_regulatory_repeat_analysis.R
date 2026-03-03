@@ -238,6 +238,44 @@ symm_window <- function(gr_tss, flank_bp) {
   )
 }
 
+expand_interval_window <- function(gr, flank_bp) {
+  starts <- pmax(1L, start(gr) - flank_bp)
+  ends <- end(gr) + flank_bp
+
+  GRanges(
+    seqnames = seqnames(gr),
+    ranges = IRanges(start = starts, end = ends),
+    strand = "*",
+    gene_id_clean = mcols(gr)$gene_id_clean
+  )
+}
+
+detect_shet_coord_columns <- function(dt) {
+  chr_col <- intersect(
+    c("chr", "chrom", "chromosome", "seqnames", "gene_chr", "gene_chrom"),
+    names(dt)
+  )[1]
+  start_col <- intersect(
+    c("start", "gene_start", "txStart", "tx_start", "geneStart", "begin"),
+    names(dt)
+  )[1]
+  end_col <- intersect(
+    c("end", "gene_end", "txEnd", "tx_end", "geneEnd", "stop"),
+    names(dt)
+  )[1]
+  gene_name_col <- intersect(
+    c("gene_name", "symbol", "hgnc_symbol", "gene_symbol"),
+    names(dt)
+  )[1]
+
+  list(
+    chr_col = chr_col,
+    start_col = start_col,
+    end_col = end_col,
+    gene_name_col = gene_name_col
+  )
+}
+
 safe_spearman <- function(x, y, label_x, label_y) {
   ok <- is.finite(x) & is.finite(y)
 
@@ -728,7 +766,14 @@ build_roadmap_enhancer_features <- function(roadmap_files, gene_tbl) {
     ]
 }
 
-build_window_enhancer_features <- function(cfg, tss_win_small, tss_win_cis) {
+build_window_enhancer_features <- function(
+  cfg,
+  gene_win_small,
+  gene_win_cis,
+  tss_win_small,
+  tss_win_cis,
+  gene_body_gr
+) {
   enhancer_path <- cfg$enhancer_bed
   if (is.null(enhancer_path) || enhancer_path == "") {
     enhancer_path <- safe_download(
@@ -741,12 +786,33 @@ build_window_enhancer_features <- function(cfg, tss_win_small, tss_win_cis) {
     to_ucsc_style() %>%
     keep_standard_chr()
 
-  count_overlaps_dt(tss_win_small, enh_gr, "enh_count_100kb") %>%
+  feature_dt <- count_overlaps_dt(gene_win_small, enh_gr, "enh_count_100kb") %>%
     merge(
-      count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_1mb"),
+      count_overlaps_dt(gene_win_cis, enh_gr, "enh_count_1mb"),
+      by = "gene_id_clean",
+      all = TRUE
+    ) %>%
+    merge(
+      count_overlaps_dt(tss_win_small, enh_gr, "enh_count_tss_100kb"),
+      by = "gene_id_clean",
+      all = TRUE
+    ) %>%
+    merge(
+      count_overlaps_dt(tss_win_cis, enh_gr, "enh_count_tss_1mb"),
+      by = "gene_id_clean",
+      all = TRUE
+    ) %>%
+    merge(
+      data.table(
+        gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
+        enh_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, enh_gr, ignore.strand = TRUE)),
+        enh_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, enh_gr))
+      ),
       by = "gene_id_clean",
       all = TRUE
     )
+
+  list(features = feature_dt, enhancer_gr = enh_gr)
 }
 
 build_log_terms <- function(dt, columns) {
@@ -858,6 +924,46 @@ shet_dt <- read_xlsx(cfg$shet_xlsx, sheet = cfg$shet_sheet) %>%
     .
   }
 
+shet_coord_cols <- detect_shet_coord_columns(shet_dt)
+shet_coord_dt <- NULL
+if (
+  !is.na(shet_coord_cols$chr_col) &&
+    !is.na(shet_coord_cols$start_col) &&
+    !is.na(shet_coord_cols$end_col)
+) {
+  shet_coord_dt <- data.table(
+    gene_id_clean = shet_dt$gene_id_clean,
+    chr_shet = normalize_chr(shet_dt[[shet_coord_cols$chr_col]]),
+    start_shet = suppressWarnings(as.numeric(shet_dt[[shet_coord_cols$start_col]])),
+    end_shet = suppressWarnings(as.numeric(shet_dt[[shet_coord_cols$end_col]])),
+    gene_name_shet = if (!is.na(shet_coord_cols$gene_name_col)) {
+      as.character(shet_dt[[shet_coord_cols$gene_name_col]])
+    } else {
+      NA_character_
+    }
+  ) %>%
+    .[
+      !is.na(gene_id_clean) &
+        gene_id_clean != "" &
+        chr_shet %in% standard_chr &
+        is.finite(start_shet) &
+        is.finite(end_shet) &
+        end_shet > start_shet
+    ] %>%
+    .[
+      ,
+      `:=`(
+        start_shet = as.integer(start_shet),
+        end_shet = as.integer(end_shet)
+      )
+    ] %>%
+    unique(by = "gene_id_clean")
+
+  message("Using S_het coordinates for ", nrow(shet_coord_dt), " genes when available.")
+} else {
+  message("S_het coordinates not found in sheet; using GTF coordinates.")
+}
+
 merged <- sum_dt %>%
   merge(
     shet_dt[, .(gene_id_clean, post_mean)],
@@ -882,7 +988,7 @@ merged <- merged %>%
   merge(tpm_means, by = "gene_id_clean", all.x = TRUE)
 
 # ----------------------- 3) GENE COORDINATES / WINDOWS ------------------------
-message("Step 4: load gene annotation and build TSS windows")
+message("Step 4: load gene annotation and build gene/TSS windows")
 
 gtf_path <- resolve_first_existing(
   unique(c(
@@ -916,6 +1022,46 @@ gene_tbl <- data.table(
   unique(by = "gene_id_clean") %>%
   .[gene_id_clean %in% merged$gene_id_clean]
 
+if (!is.null(shet_coord_dt) && nrow(shet_coord_dt) > 0L) {
+  gene_tbl <- merge(
+    gene_tbl,
+    shet_coord_dt,
+    by = "gene_id_clean",
+    all = TRUE
+  ) %>%
+    .[
+      ,
+      `:=`(
+        chr = fifelse(!is.na(chr_shet), chr_shet, chr),
+        start = as.integer(fifelse(is.finite(start_shet), start_shet, start)),
+        end = as.integer(fifelse(is.finite(end_shet), end_shet, end)),
+        gene_name = fifelse(
+          "gene_name_shet" %in% names(.) & !is.na(gene_name_shet) & gene_name_shet != "",
+          gene_name_shet,
+          gene_name
+        ),
+        strand = fifelse(is.na(strand) | strand == "", "+", strand)
+      )
+    ] %>%
+    .[
+      ,
+      gene_length := as.integer(end - start + 1L)
+    ] %>%
+    .[
+      !is.na(gene_id_clean) &
+        gene_id_clean %in% merged$gene_id_clean &
+        chr %in% standard_chr &
+        is.finite(start) &
+        is.finite(end) &
+        end > start
+    ] %>%
+    .[
+      ,
+      c("chr_shet", "start_shet", "end_shet", "gene_name_shet") := NULL
+    ] %>%
+    unique(by = "gene_id_clean")
+}
+
 if (nrow(gene_tbl) == 0L) {
   stop("No gene coordinates matched merged gene IDs. Check gene ID format and GTF build.")
 }
@@ -932,11 +1078,32 @@ tss_gr <- GRanges(
 tss_win_small <- symm_window(tss_gr, cfg$tss_window_bp)
 tss_win_cis <- symm_window(tss_gr, cfg$cis_window_bp)
 
+gene_body_gr <- GRanges(
+  seqnames = gene_tbl$chr,
+  ranges = IRanges(start = gene_tbl$start, end = gene_tbl$end),
+  strand = "*",
+  gene_id_clean = gene_tbl$gene_id_clean
+)
+
+gene_win_small <- expand_interval_window(gene_body_gr, cfg$tss_window_bp)
+gene_win_cis <- expand_interval_window(gene_body_gr, cfg$cis_window_bp)
+
 # ----------------------- 4) REGULATORY FEATURE COUNTS -------------------------
 message("Step 5: build enhancer and open-chromatin features")
 
 reg_features <- data.table(gene_id_clean = gene_tbl$gene_id_clean) %>%
   unique(by = "gene_id_clean")
+
+enh_window_obj <- build_window_enhancer_features(
+  cfg = cfg,
+  gene_win_small = gene_win_small,
+  gene_win_cis = gene_win_cis,
+  tss_win_small = tss_win_small,
+  tss_win_cis = tss_win_cis,
+  gene_body_gr = gene_body_gr
+)
+enh_count_features <- enh_window_obj$features
+enh_gr <- enh_window_obj$enhancer_gr
 
 if (identical(cfg$enhancer_source, "roadmap_links")) {
   message("Enhancer mode: Roadmap enhancer-gene links (paper-style).")
@@ -952,18 +1119,18 @@ if (identical(cfg$enhancer_source, "roadmap_links")) {
     error = function(e) {
       message("Roadmap enhancer mode failed: ", conditionMessage(e))
       if (identical(cfg$enhancer_fallback_source, "window_count")) {
-        message("Falling back to enhancer window-count mode.")
-        return(build_window_enhancer_features(cfg, tss_win_small, tss_win_cis))
+        message("Falling back to fixed-window enhancer features only (no Roadmap-linked features).")
+        return(data.table(gene_id_clean = reg_features$gene_id_clean) %>% unique(by = "gene_id_clean"))
       }
       stop(e)
     }
   )
 
   reg_features <- reg_features %>%
+    merge(enh_count_features, by = "gene_id_clean", all.x = TRUE) %>%
     merge(enh_features, by = "gene_id_clean", all.x = TRUE)
 } else if (identical(cfg$enhancer_source, "window_count")) {
-  message("Enhancer mode: fixed-window BED overlap counts.")
-  enh_count_features <- build_window_enhancer_features(cfg, tss_win_small, tss_win_cis)
+  message("Enhancer mode: fixed-window counts around gene body and TSS.")
 
   reg_features <- reg_features %>%
     merge(enh_count_features, by = "gene_id_clean", all.x = TRUE)
@@ -983,9 +1150,28 @@ open_gr <- import_bed_like(open_path, label = "open-chromatin annotations") %>%
   to_ucsc_style() %>%
   keep_standard_chr()
 
-open_features <- count_overlaps_dt(tss_win_small, open_gr, "open_count_100kb") %>%
+open_features <- count_overlaps_dt(gene_win_small, open_gr, "open_count_100kb") %>%
   merge(
-    count_overlaps_dt(tss_win_cis, open_gr, "open_count_1mb"),
+    count_overlaps_dt(gene_win_cis, open_gr, "open_count_1mb"),
+    by = "gene_id_clean",
+    all = TRUE
+  ) %>%
+  merge(
+    count_overlaps_dt(tss_win_small, open_gr, "open_count_tss_100kb"),
+    by = "gene_id_clean",
+    all = TRUE
+  ) %>%
+  merge(
+    count_overlaps_dt(tss_win_cis, open_gr, "open_count_tss_1mb"),
+    by = "gene_id_clean",
+    all = TRUE
+  ) %>%
+  merge(
+    data.table(
+      gene_id_clean = mcols(gene_body_gr)$gene_id_clean,
+      open_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, open_gr, ignore.strand = TRUE)),
+      open_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, open_gr))
+    ),
     by = "gene_id_clean",
     all = TRUE
   )
@@ -1036,17 +1222,23 @@ rep_gr <- GRanges(
   milliDiv = rmsk$milliDiv
 )
 
-# Repeat features are window-based burdens near TSS, not gene-body overlap flags.
+# Repeat features include gene-window burdens (primary), TSS-window burdens, and gene-body overlap summaries.
 repeat_features <- data.table(
-  gene_id_clean = mcols(tss_win_small)$gene_id_clean,
-  repeat_count_100kb = as.integer(countOverlaps(tss_win_small, rep_gr, ignore.strand = TRUE)),
-  repeat_bp_100kb = as.numeric(sum_overlap_bp(tss_win_small, rep_gr)),
-  repeat_count_1mb = as.integer(countOverlaps(tss_win_cis, rep_gr, ignore.strand = TRUE)),
-  repeat_bp_1mb = as.numeric(sum_overlap_bp(tss_win_cis, rep_gr))
+  gene_id_clean = mcols(gene_win_small)$gene_id_clean,
+  repeat_count_100kb = as.integer(countOverlaps(gene_win_small, rep_gr, ignore.strand = TRUE)),
+  repeat_bp_100kb = as.numeric(sum_overlap_bp(gene_win_small, rep_gr)),
+  repeat_count_1mb = as.integer(countOverlaps(gene_win_cis, rep_gr, ignore.strand = TRUE)),
+  repeat_bp_1mb = as.numeric(sum_overlap_bp(gene_win_cis, rep_gr)),
+  repeat_count_tss_100kb = as.integer(countOverlaps(tss_win_small, rep_gr, ignore.strand = TRUE)),
+  repeat_bp_tss_100kb = as.numeric(sum_overlap_bp(tss_win_small, rep_gr)),
+  repeat_count_tss_1mb = as.integer(countOverlaps(tss_win_cis, rep_gr, ignore.strand = TRUE)),
+  repeat_bp_tss_1mb = as.numeric(sum_overlap_bp(tss_win_cis, rep_gr)),
+  repeat_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, rep_gr, ignore.strand = TRUE)),
+  repeat_overlap_gene_body_bp = as.numeric(sum_overlap_bp(gene_body_gr, rep_gr))
 )
 
 repeat_class_obj <- count_and_bp_by_group(
-  window_gr = tss_win_small,
+  window_gr = gene_win_small,
   feature_gr = rep_gr,
   feature_group = mcols(rep_gr)$repClass,
   prefix = "repeat_class",
@@ -1111,7 +1303,7 @@ analysis_dt <- merged %>%
   merge(repeat_class_dt, by = "gene_id_clean", all.x = TRUE)
 
 count_cols <- names(analysis_dt) %>%
-  str_subset("^(enh_count_|enh_link_|open_count_|repeat_count_|repeat_bp_|repeat_class_)")
+  str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_bp_|repeat_overlap_|repeat_class_)")
 
 if (length(count_cols) > 0L) {
   analysis_dt[, (count_cols) := lapply(
@@ -1132,9 +1324,27 @@ expected_feature_cols <- c(
   "enh_link_mean_count_active",
   "enh_link_mean_total_bp_active",
   "enh_count_100kb",
+  "enh_count_1mb",
+  "enh_count_tss_100kb",
+  "enh_count_tss_1mb",
+  "enh_overlap_gene_body_n",
+  "enh_overlap_gene_body_bp",
   "open_count_100kb",
+  "open_count_1mb",
+  "open_count_tss_100kb",
+  "open_count_tss_1mb",
+  "open_overlap_gene_body_n",
+  "open_overlap_gene_body_bp",
   "repeat_count_100kb",
   "repeat_bp_100kb",
+  "repeat_count_1mb",
+  "repeat_bp_1mb",
+  "repeat_count_tss_100kb",
+  "repeat_bp_tss_100kb",
+  "repeat_count_tss_1mb",
+  "repeat_bp_tss_1mb",
+  "repeat_overlap_gene_body_n",
+  "repeat_overlap_gene_body_bp",
   "repeat_active_class_n_100kb",
   "repeat_mean_count_active_class_100kb",
   "repeat_mean_bp_active_class_100kb",
@@ -1160,9 +1370,15 @@ decile_summary <- analysis_dt %>%
       median_enh_mean_count_active = median(enh_link_mean_count_active, na.rm = TRUE),
       median_enh_mean_bp_active = median(enh_link_mean_total_bp_active, na.rm = TRUE),
       median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
+      median_enh_1mb = median(enh_count_1mb, na.rm = TRUE),
+      median_enh_overlap_gene_body_n = median(enh_overlap_gene_body_n, na.rm = TRUE),
       median_open_100kb = median(open_count_100kb, na.rm = TRUE),
+      median_open_1mb = median(open_count_1mb, na.rm = TRUE),
+      median_open_overlap_gene_body_n = median(open_overlap_gene_body_n, na.rm = TRUE),
       median_repeat_100kb = median(repeat_count_100kb, na.rm = TRUE),
+      median_repeat_1mb = median(repeat_count_1mb, na.rm = TRUE),
       median_repeat_bp_100kb = median(repeat_bp_100kb, na.rm = TRUE),
+      median_repeat_overlap_gene_body_n = median(repeat_overlap_gene_body_n, na.rm = TRUE),
       median_repeat_active_class_n_100kb = median(repeat_active_class_n_100kb, na.rm = TRUE),
       median_repeat_LINE_count_100kb = median(repeat_class_LINE_count_100kb, na.rm = TRUE),
       median_repeat_SINE_count_100kb = median(repeat_class_SINE_count_100kb, na.rm = TRUE)
@@ -1178,20 +1394,46 @@ cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_active_biosample_n, "post_mean", "enh_link_active_biosample_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_mean_total_bp_active, "post_mean", "enh_link_mean_total_bp_active"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_count_100kb, "post_mean", "enh_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$enh_overlap_gene_body_n, "post_mean", "enh_overlap_gene_body_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$open_count_100kb, "post_mean", "open_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$open_overlap_gene_body_n, "post_mean", "open_overlap_gene_body_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_count_100kb, "post_mean", "repeat_count_100kb"),
+  safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_overlap_gene_body_n, "post_mean", "repeat_overlap_gene_body_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_LINE_count_100kb, "post_mean", "repeat_class_LINE_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_SINE_count_100kb, "post_mean", "repeat_class_SINE_count_100kb"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_active_biosample_n, "h2_GREML", "enh_link_active_biosample_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_mean_total_bp_active, "h2_GREML", "enh_link_mean_total_bp_active"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_count_100kb, "h2_GREML", "enh_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_overlap_gene_body_n, "h2_GREML", "enh_overlap_gene_body_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$open_count_100kb, "h2_GREML", "open_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$open_overlap_gene_body_n, "h2_GREML", "open_overlap_gene_body_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_count_100kb, "h2_GREML", "repeat_count_100kb"),
+  safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_overlap_gene_body_n, "h2_GREML", "repeat_overlap_gene_body_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_class_LINE_count_100kb, "h2_GREML", "repeat_class_LINE_count_100kb"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$repeat_class_SINE_count_100kb, "h2_GREML", "repeat_class_SINE_count_100kb")
 ))
 
 fwrite(cor_dt, file.path(cfg$output_dir, "spearman_correlations.tsv"), sep = "\t")
+
+overlap_cols <- c(
+  "enh_overlap_gene_body_n",
+  "open_overlap_gene_body_n",
+  "repeat_overlap_gene_body_n"
+) %>%
+  .[. %in% names(analysis_dt)]
+
+if (length(overlap_cols) > 0L) {
+  overlap_summary <- data.table(feature = overlap_cols) %>%
+    .[
+      ,
+      `:=`(
+        n_genes_with_overlap = vapply(feature, function(col) sum(analysis_dt[[col]] > 0, na.rm = TRUE), numeric(1)),
+        prop_genes_with_overlap = vapply(feature, function(col) mean(analysis_dt[[col]] > 0, na.rm = TRUE), numeric(1)),
+        median_overlap_count = vapply(feature, function(col) median(analysis_dt[[col]], na.rm = TRUE), numeric(1))
+      )
+    ]
+  fwrite(overlap_summary, file.path(cfg$output_dir, "gene_body_overlap_summary.tsv"), sep = "\t")
+}
 
 # --------------------------- 8) ASSOCIATION MODELS ----------------------------
 model_dt <- analysis_dt %>%
@@ -1219,8 +1461,14 @@ primary_numeric_cols <- c(
   "enh_link_active_biosample_n",
   "enh_link_mean_total_bp_active",
   "enh_count_100kb",
+  "enh_count_1mb",
+  "enh_overlap_gene_body_n",
   "open_count_100kb",
+  "open_count_1mb",
+  "open_overlap_gene_body_n",
   "repeat_count_100kb",
+  "repeat_count_1mb",
+  "repeat_overlap_gene_body_n",
   "repeat_class_LINE_count_100kb",
   "repeat_class_SINE_count_100kb",
   "mean_tpm",
