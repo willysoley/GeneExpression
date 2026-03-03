@@ -100,6 +100,14 @@ normalize_chr <- function(x) {
   paste0("chr", y)
 }
 
+normalize_repeat_class <- function(x) {
+  x %>%
+    as.character() %>%
+    str_replace_all("\\?", "") %>%
+    str_squish() %>%
+    na_if("")
+}
+
 add_missing_numeric_cols <- function(df, cols, default_value = 0) {
   missing_cols <- setdiff(cols, names(df))
   if (length(missing_cols) == 0L) {
@@ -991,29 +999,9 @@ enh_count_features <- enh_window_obj$features
 enh_gr <- enh_window_obj$enhancer_gr
 
 if (identical(cfg$enhancer_source, "roadmap_links")) {
-  message("Enhancer mode: Roadmap enhancer-gene links (paper-style).")
-  enh_features <- tryCatch(
-    {
-      roadmap_files <- resolve_roadmap_link_files(cfg)
-      message("Roadmap biosample files found: ", length(roadmap_files))
-      build_roadmap_enhancer_features(
-        roadmap_files = roadmap_files,
-        gene_tbl = gene_tbl
-      )
-    },
-    error = function(e) {
-      message("Roadmap enhancer mode failed: ", conditionMessage(e))
-      if (identical(cfg$enhancer_fallback_source, "window_count")) {
-        message("Falling back to fixed-window enhancer features only (no Roadmap-linked features).")
-        return(reg_features %>% as.data.table())
-      }
-      stop(e)
-    }
-  )
-
+  message("Enhancer mode requested: roadmap_links. Active-biosample metrics disabled; using fixed-window enhancer counts.")
   reg_features <- reg_features %>%
-    left_join(as_tibble(enh_count_features), by = "gene_id_clean") %>%
-    left_join(as_tibble(enh_features), by = "gene_id_clean")
+    left_join(as_tibble(enh_count_features), by = "gene_id_clean")
 } else if (identical(cfg$enhancer_source, "window_count")) {
   message("Enhancer mode: fixed-window counts around gene body and TSS.")
 
@@ -1074,6 +1062,7 @@ names(rmsk)[1:17] <- c(
 
 rmsk <- rmsk %>%
   as_tibble() %>%
+  mutate(repClass = normalize_repeat_class(repClass)) %>%
   filter(
     genoName %in% paste0("chr", c(1:22, "X", "Y")),
     !is.na(repClass),
@@ -1174,7 +1163,7 @@ analysis_dt <- merged %>%
   left_join(repeat_class_dt, by = "gene_id_clean")
 
 count_cols <- names(analysis_dt) %>%
-  str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_.*_count$)")
+  str_subset("^(enh_count_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_.*_count$)")
 
 if (length(count_cols) > 0L) {
   analysis_dt <- analysis_dt %>%
@@ -1190,8 +1179,6 @@ fwrite(as.data.table(analysis_dt), file.path(cfg$output_dir, "gene_level_feature
 
 # ----------------------------- 7) SUMMARIES -----------------------------------
 expected_feature_cols <- c(
-  "enh_link_active_biosample_n",
-  "enh_link_mean_count_active",
   "enh_count_100kb",
   "enh_count_1mb",
   "enh_count_tss_100kb",
@@ -1220,8 +1207,6 @@ decile_summary <- analysis_dt %>%
     n_genes = n(),
     median_h2 = median(h2_GREML, na.rm = TRUE),
     prop_h2_sig = mean(Pval_GREML < 0.05, na.rm = TRUE),
-    median_enh_active_biosample_n = median(enh_link_active_biosample_n, na.rm = TRUE),
-    median_enh_mean_count_active = median(enh_link_mean_count_active, na.rm = TRUE),
     median_enh_100kb = median(enh_count_100kb, na.rm = TRUE),
     median_enh_1mb = median(enh_count_1mb, na.rm = TRUE),
     median_enh_overlap_gene_body_n = median(enh_overlap_gene_body_n, na.rm = TRUE),
@@ -1242,7 +1227,6 @@ fwrite(as.data.table(decile_summary), file.path(cfg$output_dir, "decile_feature_
 
 cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$h2_GREML, "post_mean", "h2_GREML"),
-  safe_spearman(analysis_dt$post_mean, analysis_dt$enh_link_active_biosample_n, "post_mean", "enh_link_active_biosample_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_count_100kb, "post_mean", "enh_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$enh_overlap_gene_body_n, "post_mean", "enh_overlap_gene_body_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$open_count_100kb, "post_mean", "open_count_100kb"),
@@ -1251,7 +1235,6 @@ cor_dt <- rbindlist(list(
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_overlap_gene_body_n, "post_mean", "repeat_overlap_gene_body_n"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_LINE_count_100kb, "post_mean", "repeat_class_LINE_count_100kb"),
   safe_spearman(analysis_dt$post_mean, analysis_dt$repeat_class_SINE_count_100kb, "post_mean", "repeat_class_SINE_count_100kb"),
-  safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_link_active_biosample_n, "h2_GREML", "enh_link_active_biosample_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_count_100kb, "h2_GREML", "enh_count_100kb"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$enh_overlap_gene_body_n, "h2_GREML", "enh_overlap_gene_body_n"),
   safe_spearman(analysis_dt$h2_GREML, analysis_dt$open_count_100kb, "h2_GREML", "open_count_100kb"),
@@ -1303,7 +1286,6 @@ if (post_mean_levels >= 2L) {
 }
 
 primary_numeric_cols <- c(
-  "enh_link_active_biosample_n",
   "enh_count_100kb",
   "enh_count_1mb",
   "enh_overlap_gene_body_n",
@@ -1408,7 +1390,7 @@ analysis_tbl <- analysis_dt %>%
   as_tibble()
 
 postmean_feature_cols <- names(analysis_tbl) %>%
-  str_subset("^(enh_count_|enh_link_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_[A-Za-z0-9_]+_count$)")
+  str_subset("^(enh_count_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_[A-Za-z0-9_]+_count$)")
 
 postmean_feature_cols <- postmean_feature_cols[postmean_feature_cols %in% names(analysis_tbl)]
 postmean_feature_cols <- setdiff(postmean_feature_cols, "post_mean_bin")
@@ -1481,8 +1463,6 @@ if (length(postmean_feature_cols) > 0L) {
 }
 
 reg_decile_cols <- c(
-  "enh_link_active_biosample_n",
-  "enh_link_mean_count_active",
   "enh_count_100kb",
   "enh_count_1mb",
   "enh_overlap_gene_body_n",
@@ -1635,46 +1615,29 @@ ggsave(
   height = 5
 )
 
-reg_plot_cols <- c(
-  "enh_link_active_biosample_n",
-  "enh_link_mean_count_active",
-  "enh_count_100kb",
-  "open_count_100kb"
+p_h2_box <- analysis_dt %>%
+  as_tibble() %>%
+  filter(is.finite(h2_GREML), !is.na(post_mean_bin)) %>%
+  ggplot(aes(x = factor(post_mean_bin), y = h2_GREML)) +
+  geom_boxplot(
+    fill = "#8ecae6",
+    color = "#1d3557",
+    outlier.alpha = 0.35,
+    outlier.size = 0.8
+  ) +
+  labs(
+    title = "h2_GREML Distribution by s_het post_mean Decile",
+    x = "s_het post_mean decile",
+    y = "h2_GREML"
+  ) +
+  theme_minimal(base_size = 12)
+
+ggsave(
+  filename = file.path(cfg$output_dir, "plots", "regulatory_burden_vs_h2.pdf"),
+  plot = p_h2_box,
+  width = 9,
+  height = 5.5
 )
-reg_plot_cols <- reg_plot_cols[reg_plot_cols %in% names(analysis_dt)]
-
-if (length(reg_plot_cols) > 0L) {
-  p_reg <- analysis_dt %>%
-    as_tibble() %>%
-    select(h2_GREML, all_of(reg_plot_cols)) %>%
-    pivot_longer(
-      cols = all_of(reg_plot_cols),
-      names_to = "feature",
-      values_to = "value"
-    ) %>%
-    ggplot(aes(x = log1p(value), y = h2_GREML)) +
-    geom_point(alpha = 0.15, size = 0.8, color = "gray35") +
-    geom_smooth(
-      method = "gam",
-      color = "#e07a5f",
-      fill = "#e07a5f",
-      alpha = 0.2
-    ) +
-    facet_wrap(~feature, scales = "free_x") +
-    labs(
-      title = "Regulatory feature burden vs heritability",
-      x = "log1p(feature value)",
-      y = "h2_GREML"
-    ) +
-    theme_minimal(base_size = 12)
-
-  ggsave(
-    filename = file.path(cfg$output_dir, "plots", "regulatory_burden_vs_h2.pdf"),
-    plot = p_reg,
-    width = 10,
-    height = 5.5
-  )
-}
 
 repeat_class_cols <- names(analysis_dt) %>%
   str_subset("^repeat_class_.*_count_100kb$")
