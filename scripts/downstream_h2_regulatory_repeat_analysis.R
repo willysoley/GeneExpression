@@ -1133,14 +1133,41 @@ repeat_features <- data.table(
   repeat_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, rep_gr, ignore.strand = TRUE))
 )
 
-repeat_class_dt <- count_by_group(
-  window_gr = gene_win_small,
-  feature_gr = rep_gr,
-  feature_group = mcols(rep_gr)$repClass,
-  prefix = "repeat_class",
-  suffix = "_count_100kb"
+repeat_class_dt <- list(
+  count_by_group(
+    window_gr = gene_win_small,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repClass,
+    prefix = "repeat_class",
+    suffix = "_count_100kb"
+  ) %>%
+    as_tibble(),
+  count_by_group(
+    window_gr = gene_win_quarter,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repClass,
+    prefix = "repeat_class",
+    suffix = "_count_250kb"
+  ) %>%
+    as_tibble(),
+  count_by_group(
+    window_gr = gene_win_mid,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repClass,
+    prefix = "repeat_class",
+    suffix = "_count_500kb"
+  ) %>%
+    as_tibble(),
+  count_by_group(
+    window_gr = gene_win_cis,
+    feature_gr = rep_gr,
+    feature_group = mcols(rep_gr)$repClass,
+    prefix = "repeat_class",
+    suffix = "_count_1mb"
+  ) %>%
+    as_tibble()
 ) %>%
-  as_tibble()
+  reduce(left_join, by = "gene_id_clean")
 
 repeat_count_class_cols <- names(repeat_class_dt) %>%
   str_subset("^repeat_class_.*_count_100kb$")
@@ -1178,20 +1205,31 @@ for (cls in c("LINE", "SINE", "LTR", "DNA")) {
 }
 
 # Add alias columns requested by user:
-# repeat_<repClass>_count, sourced from repeat_class_<repClass>_count_100kb.
+# repeat_<repClass>_count from 100kb, plus window-specific aliases
+# repeat_<repClass>_count_<window>.
 repeat_class_count_cols <- names(repeat_class_dt) %>%
-  str_subset("^repeat_class_.*_count_100kb$")
+  str_subset("^repeat_class_.*_count_(100kb|250kb|500kb|1mb)$")
 
 if (length(repeat_class_count_cols) > 0L) {
   for (src_col in repeat_class_count_cols) {
     rep_class_name <- src_col %>%
       str_remove("^repeat_class_") %>%
-      str_remove("_count_100kb$")
-    alias_col <- paste0("repeat_", rep_class_name, "_count")
+      str_remove("_count_(100kb|250kb|500kb|1mb)$")
+    window_label <- src_col %>%
+      str_extract("(100kb|250kb|500kb|1mb)$")
 
-    if (!alias_col %in% names(repeat_class_dt)) {
+    alias_col_window <- paste0("repeat_", rep_class_name, "_count_", window_label)
+    if (!alias_col_window %in% names(repeat_class_dt)) {
       repeat_class_dt <- repeat_class_dt %>%
-        mutate(!!alias_col := .data[[src_col]])
+        mutate(!!alias_col_window := .data[[src_col]])
+    }
+
+    if (identical(window_label, "100kb")) {
+      alias_col <- paste0("repeat_", rep_class_name, "_count")
+      if (!alias_col %in% names(repeat_class_dt)) {
+        repeat_class_dt <- repeat_class_dt %>%
+          mutate(!!alias_col := .data[[src_col]])
+      }
     }
   }
 }
@@ -1207,7 +1245,7 @@ analysis_dt <- merged %>%
   left_join(repeat_class_dt, by = "gene_id_clean")
 
 count_cols <- names(analysis_dt) %>%
-  str_subset("^(enh_count_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_.*_count$)")
+  str_subset("^(enh_count_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_[A-Za-z0-9_]+_count(_(100kb|250kb|500kb|1mb))?$)")
 
 if (length(count_cols) > 0L) {
   analysis_dt <- analysis_dt %>%
@@ -1617,28 +1655,26 @@ if (length(reg_decile_cols) > 0L) {
   )
 }
 
-repeat_type_cols <- names(analysis_tbl) %>%
-  str_subset("^repeat_[A-Za-z0-9_]+_count$") %>%
-  setdiff(c(
-    "repeat_count_100kb",
-    "repeat_count_250kb",
-    "repeat_count_500kb",
-    "repeat_count_1mb",
-    "repeat_count_tss_100kb",
-    "repeat_count_tss_250kb",
-    "repeat_count_tss_500kb",
-    "repeat_count_tss_1mb"
-  ))
+repeat_type_window_cols <- names(analysis_tbl) %>%
+  str_subset("^repeat_[A-Za-z0-9_]+_count_(100kb|250kb|500kb|1mb)$")
 
-if (length(repeat_type_cols) > 0L) {
+if (length(repeat_type_window_cols) > 0L) {
   repeat_type_postmean_stats <- analysis_tbl %>%
-    select(post_mean_bin, all_of(repeat_type_cols)) %>%
+    select(post_mean_bin, all_of(repeat_type_window_cols)) %>%
     pivot_longer(
       cols = -post_mean_bin,
-      names_to = "repeat_type",
+      names_to = "feature_col",
       values_to = "value"
     ) %>%
-    group_by(post_mean_bin, repeat_type) %>%
+    mutate(
+      repeat_type = feature_col %>%
+        str_remove("^repeat_") %>%
+        str_remove("_count_(100kb|250kb|500kb|1mb)$"),
+      window = feature_col %>%
+        str_extract("(100kb|250kb|500kb|1mb)$"),
+      window = factor(window, levels = c("100kb", "250kb", "500kb", "1mb"))
+    ) %>%
+    group_by(post_mean_bin, repeat_type, window) %>%
     summarise(
       mean_value = mean(value, na.rm = TRUE),
       median_value = median(value, na.rm = TRUE),
@@ -1653,13 +1689,14 @@ if (length(repeat_type_cols) > 0L) {
   )
 
   repeat_type_trend_long <- repeat_type_postmean_stats %>%
-    select(post_mean_bin, repeat_type, mean_value, median_value) %>%
+    select(post_mean_bin, repeat_type, window, mean_value, median_value) %>%
     pivot_longer(
       cols = c(mean_value, median_value),
       names_to = "stat",
       values_to = "value"
     ) %>%
     mutate(
+      repeat_type = factor(repeat_type, levels = sort(unique(repeat_type))),
       stat = recode(
         stat,
         mean_value = "Mean",
@@ -1672,25 +1709,25 @@ if (length(repeat_type_cols) > 0L) {
     aes(x = post_mean_bin, y = value, color = stat, group = stat)
   ) +
     geom_line(linewidth = 0.8) +
-    geom_point(size = 1.4) +
+    geom_point(size = 1.3) +
     scale_x_continuous(breaks = 1:10) +
     scale_color_manual(values = c("Mean" = "#3a86ff", "Median" = "#fb5607")) +
-    facet_wrap(~repeat_type, scales = "free_y", ncol = 4) +
+    facet_grid(rows = vars(window), cols = vars(repeat_type), scales = "free_y") +
     labs(
-      title = "Repeat Type Counts Across s_het Deciles",
-      subtitle = "Mean and median counts by repeat subtype",
+      title = "Repeat Type Counts Across s_het Deciles by Window",
+      subtitle = "Mean and median counts by repeat subtype, separated by window size",
       x = "s_het post_mean decile",
       y = "Repeat count",
       color = "Statistic"
     ) +
-    theme_minimal(base_size = 10) +
+    theme_minimal(base_size = 9) +
     theme(legend.position = "top")
 
   ggsave(
     filename = file.path(cfg$output_dir, "plots", "postmean_repeat_type_trends_mean_median.pdf"),
     plot = p_repeat_types,
-    width = 16,
-    height = 10
+    width = 20,
+    height = 12
   )
 }
 
