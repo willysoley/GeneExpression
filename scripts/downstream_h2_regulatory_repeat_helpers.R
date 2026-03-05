@@ -935,3 +935,197 @@ simulate_poisson_background <- function(sim_input, n_iter, seed) {
       .groups = "drop"
     )
 }
+
+build_repeat_sim_catalog <- function(repeat_tbl, chrom_sizes_dt, type_col = "repClass_norm", composition_basis = "bp") {
+  if (!composition_basis %in% c("bp", "count")) {
+    stop("composition_basis must be one of: 'bp', 'count'.")
+  }
+  if (!type_col %in% names(repeat_tbl)) {
+    stop("type_col not found in repeat_tbl: ", type_col)
+  }
+
+  chrom_keep <- chrom_sizes_dt$chr %>% as.character()
+
+  tbl <- repeat_tbl %>%
+    as_tibble() %>%
+    mutate(
+      chr = normalize_chr(genoName),
+      repeat_type = as.character(.data[[type_col]]),
+      rep_len_bp = as.numeric(rep_len_bp)
+    ) %>%
+    filter(
+      chr %in% chrom_keep,
+      !is.na(repeat_type),
+      repeat_type != "",
+      is.finite(rep_len_bp),
+      rep_len_bp > 0
+    )
+
+  if (nrow(tbl) == 0L) {
+    return(list(
+      source_n = 0L,
+      source_bp = 0,
+      type_stats = tibble(),
+      chrom_prob = tibble(),
+      length_pools = list()
+    ))
+  }
+
+  type_stats <- tbl %>%
+    group_by(repeat_type) %>%
+    summarise(
+      obs_n = n(),
+      obs_bp = sum(rep_len_bp, na.rm = TRUE),
+      mean_len_bp = mean(rep_len_bp, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      comp_weight = if_else(composition_basis == "count", as.numeric(obs_n), as.numeric(obs_bp)),
+      type_prob = comp_weight / sum(comp_weight, na.rm = TRUE)
+    )
+
+  chrom_prob <- tbl %>%
+    group_by(repeat_type, chr) %>%
+    summarise(
+      obs_n = n(),
+      obs_bp = sum(rep_len_bp, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    group_by(repeat_type) %>%
+    mutate(
+      chrom_weight = if_else(composition_basis == "count", as.numeric(obs_n), as.numeric(obs_bp)),
+      chrom_prob = chrom_weight / sum(chrom_weight, na.rm = TRUE)
+    ) %>%
+    ungroup()
+
+  length_pools <- split(tbl$rep_len_bp, tbl$repeat_type)
+
+  list(
+    source_n = as.integer(nrow(tbl)),
+    source_bp = as.numeric(sum(tbl$rep_len_bp, na.rm = TRUE)),
+    type_stats = type_stats,
+    chrom_prob = chrom_prob,
+    length_pools = length_pools
+  )
+}
+
+simulate_repeat_genome_dt <- function(catalog, chrom_sizes_dt, repeat_fraction, seed) {
+  if (catalog$source_n == 0L || nrow(catalog$type_stats) == 0L) {
+    return(data.table())
+  }
+
+  chrom_sizes <- chrom_sizes_dt %>%
+    as_tibble() %>%
+    transmute(
+      chr = as.character(chr),
+      chrom_size = as.numeric(chrom_size)
+    ) %>%
+    filter(is.finite(chrom_size), chrom_size > 0)
+
+  if (nrow(chrom_sizes) == 0L) {
+    return(data.table())
+  }
+
+  repeat_fraction <- as.numeric(repeat_fraction)
+  repeat_fraction <- pmax(0, pmin(repeat_fraction, 0.95))
+  total_bp <- sum(chrom_sizes$chrom_size, na.rm = TRUE)
+  target_total_bp <- as.integer(round(total_bp * repeat_fraction))
+
+  if (target_total_bp <= 0L) {
+    return(data.table())
+  }
+
+  set.seed(seed)
+
+  type_plan <- catalog$type_stats %>%
+    mutate(target_bp = as.integer(round(target_total_bp * type_prob)))
+
+  bp_diff <- target_total_bp - sum(type_plan$target_bp, na.rm = TRUE)
+  if (bp_diff != 0L && nrow(type_plan) > 0L) {
+    ord <- order(type_plan$type_prob, decreasing = TRUE)
+    idx_seq <- rep(ord, length.out = abs(bp_diff))
+    for (idx in idx_seq) {
+      type_plan$target_bp[[idx]] <- type_plan$target_bp[[idx]] + sign(bp_diff)
+    }
+  }
+
+  chrom_size_vec <- setNames(chrom_sizes$chrom_size, chrom_sizes$chr)
+  sim_chunks <- vector("list", nrow(type_plan))
+
+  for (i in seq_len(nrow(type_plan))) {
+    repeat_type <- type_plan$repeat_type[[i]]
+    target_bp <- as.numeric(type_plan$target_bp[[i]])
+
+    if (!is.finite(target_bp) || target_bp <= 0) {
+      next
+    }
+
+    len_pool <- catalog$length_pools[[repeat_type]]
+    len_pool <- len_pool[is.finite(len_pool) & len_pool > 0]
+    if (length(len_pool) == 0L) {
+      next
+    }
+
+    mean_len <- mean(len_pool, na.rm = TRUE)
+    n_draw <- max(1L, as.integer(ceiling(target_bp / mean_len)))
+    len_draw <- sample(len_pool, size = n_draw, replace = TRUE)
+
+    cum_bp <- cumsum(len_draw)
+    keep_n <- which(cum_bp >= target_bp)[1]
+    if (!is.na(keep_n)) {
+      len_draw <- len_draw[seq_len(keep_n)]
+    }
+
+    type_chr_prob <- catalog$chrom_prob %>%
+      as_tibble() %>%
+      filter(repeat_type == .env$repeat_type) %>%
+      select(chr, chrom_prob) %>%
+      filter(chr %in% chrom_sizes$chr)
+
+    if (nrow(type_chr_prob) == 0L) {
+      type_chr_prob <- chrom_sizes %>%
+        transmute(
+          chr = chr,
+          chrom_prob = chrom_size / sum(chrom_size, na.rm = TRUE)
+        )
+    }
+
+    chr_draw <- sample(
+      x = type_chr_prob$chr,
+      size = length(len_draw),
+      replace = TRUE,
+      prob = type_chr_prob$chrom_prob
+    )
+
+    chrom_size_draw <- chrom_size_vec[chr_draw]
+    max_start <- as.integer(chrom_size_draw - len_draw + 1L)
+    keep_idx <- which(is.finite(max_start) & max_start >= 1L)
+
+    if (length(keep_idx) == 0L) {
+      next
+    }
+
+    len_draw <- len_draw[keep_idx]
+    chr_draw <- chr_draw[keep_idx]
+    max_start <- max_start[keep_idx]
+
+    start_draw <- as.integer(floor(runif(length(len_draw)) * max_start) + 1L)
+    end_draw <- as.integer(start_draw + len_draw - 1L)
+
+    sim_chunks[[i]] <- data.table(
+      chr = as.character(chr_draw),
+      start = start_draw,
+      end = end_draw,
+      repeat_type = as.character(repeat_type),
+      rep_len_bp = as.numeric(len_draw)
+    )
+  }
+
+  sim_dt <- rbindlist(sim_chunks, use.names = TRUE, fill = TRUE)
+  if (nrow(sim_dt) == 0L) {
+    return(sim_dt)
+  }
+
+  sim_dt <- sim_dt[start >= 1L & end >= start]
+  sim_dt
+}
