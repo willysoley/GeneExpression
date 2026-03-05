@@ -57,8 +57,9 @@ cfg <- list(
   repeat_bg_repeat_fraction = 0.5,      # target genome repeat fraction for reference filter set
   repeat_bg_type_col = "repClass_norm", # column used for repeat composition in simulation
   repeat_bg_composition_basis = "bp",   # options: "bp", "count"
-  repeat_bg_n_iter = 1000L,
+  repeat_bg_n_iter = 100L,
   repeat_bg_seed = 20260305L,
+  repeat_bg_use_cache = TRUE,
   sine_subset_top_n = 40L
 )
 

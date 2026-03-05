@@ -103,7 +103,20 @@ run_repeat_background_analysis <- function(
       sep = "\t"
     )
 
-    if (isTRUE(as.integer(cfg$repeat_bg_n_iter) > 0L)) {
+    bg_iter_cache_path <- file.path(output_dir, "repeat_filtered_background_iter.tsv")
+    bg_seed_cache_path <- file.path(output_dir, "repeat_background_seed_map.tsv")
+    use_bg_cache <- isTRUE(cfg$repeat_bg_use_cache) && file.exists(bg_iter_cache_path)
+
+    if (use_bg_cache) {
+      message("Using cached background simulation data: ", bg_iter_cache_path)
+      repeat_background_iter <- fread(bg_iter_cache_path) %>%
+        as_tibble()
+
+      if (file.exists(bg_seed_cache_path)) {
+        repeat_bg_seed_map <- fread(bg_seed_cache_path) %>%
+          as_tibble()
+      }
+    } else if (isTRUE(as.integer(cfg$repeat_bg_n_iter) > 0L)) {
       bg_method <- as.character(cfg$repeat_bg_method)
       if (!bg_method %in% c("explicit_genome", "poisson_window")) {
         stop("Unknown cfg$repeat_bg_method: ", bg_method)
@@ -215,6 +228,8 @@ run_repeat_background_analysis <- function(
         sep = "\t"
       )
 
+      n_iter_bg <- as.integer(cfg$repeat_bg_n_iter)
+
       if (identical(bg_method, "explicit_genome")) {
         for (row_idx in seq_len(nrow(repeat_filter_map))) {
           filter_set_name <- repeat_filter_map$filter_set[[row_idx]]
@@ -244,7 +259,14 @@ run_repeat_background_analysis <- function(
             next
           }
 
-          for (iter_idx in seq_len(as.integer(cfg$repeat_bg_n_iter))) {
+          for (iter_idx in seq_len(n_iter_bg)) {
+            if (iter_idx %% 100L == 0L || iter_idx == n_iter_bg) {
+              message(
+                "[Background][", filter_set_name, "] iteration ",
+                iter_idx, "/", n_iter_bg
+              )
+            }
+
             sim_idx <- sim_idx + 1L
             seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx
 
@@ -269,7 +291,7 @@ run_repeat_background_analysis <- function(
               filter_set_clean = filter_clean,
               window = "all_windows",
               seed_used = as.integer(seed_used),
-              n_iter = as.integer(cfg$repeat_bg_n_iter),
+              n_iter = n_iter_bg,
               seed_base = as.integer(cfg$repeat_bg_seed),
               seed_strategy = "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop",
               repeat_bg_method = bg_method,
@@ -354,7 +376,7 @@ run_repeat_background_analysis <- function(
               filter_set_clean = filter_clean,
               window = window_label,
               seed_used = as.integer(seed_used),
-              n_iter = as.integer(cfg$repeat_bg_n_iter),
+              n_iter = n_iter_bg,
               seed_base = as.integer(cfg$repeat_bg_seed),
               seed_strategy = "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop",
               repeat_bg_method = bg_method,
@@ -365,7 +387,7 @@ run_repeat_background_analysis <- function(
 
             bg_iter <- simulate_poisson_background(
               sim_input = sim_input,
-              n_iter = as.integer(cfg$repeat_bg_n_iter),
+              n_iter = n_iter_bg,
               seed = as.integer(seed_used)
             ) %>%
               mutate(
