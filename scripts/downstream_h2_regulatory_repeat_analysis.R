@@ -30,6 +30,9 @@ cfg <- list(
   resource_dir = "resources/public_annotations",
   sdrf_url = "https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt",
   eur_pops = c("British", "Finnish", "Tuscan", "Utah"),
+  expression_filter_mode = "gtex_tpm",  # options: "gtex_tpm", "any_nonzero"
+  gtex_tpm_threshold = 0.1,
+  gtex_sample_frac_threshold = 0.2,
   tss_window_bp = 100000L,
   quarter_window_bp = 250000L,
   mid_window_bp = 500000L,
@@ -1038,7 +1041,7 @@ sanity_check(
   fail_msg = "Too few European runs detected; check cfg$eur_pops and SDRF labels."
 )
 
-message("Step 2: load TPM and keep genes with TPM > 0 in at least one EU sample")
+message("Step 2: load TPM and apply expression filter (GTEx-style by default)")
 stop_if_missing(cfg$tpm_tsv, "TPM matrix")
 
 tpm <- fread(cfg$tpm_tsv)
@@ -1062,15 +1065,80 @@ if (length(eur_sample_cols) == 0L) {
   stop("No European sample columns matched TPM columns after cleaning suffixes.")
 }
 
+n_eur_samples <- length(eur_sample_cols)
+min_samples_required <- ceiling(cfg$gtex_sample_frac_threshold * n_eur_samples)
+
 tpm_eur <- tpm_eur %>%
-  mutate(across(all_of(eur_sample_cols), as.numeric)) %>%
-  filter(if_any(all_of(eur_sample_cols), ~ .x > 0)) %>%
-  mutate(
-    gene_id_clean = strip_gene_version(.data[[gene_col]]),
-    mean_tpm = rowMeans(select(., all_of(eur_sample_cols)), na.rm = TRUE)
-  ) %>%
+  mutate(across(all_of(eur_sample_cols), as.numeric))
+
+if (identical(cfg$expression_filter_mode, "gtex_tpm")) {
+  tpm_eur <- tpm_eur %>%
+    mutate(
+      n_samples_tpm_ge_threshold = rowSums(
+        across(
+          all_of(eur_sample_cols),
+          ~ replace_na(.x, 0) >= cfg$gtex_tpm_threshold
+        )
+      ),
+      pass_expression_filter = n_samples_tpm_ge_threshold >= min_samples_required
+    ) %>%
+    filter(pass_expression_filter) %>%
+    mutate(
+      gene_id_clean = strip_gene_version(.data[[gene_col]]),
+      mean_tpm = rowMeans(select(., all_of(eur_sample_cols)), na.rm = TRUE)
+    )
+} else if (identical(cfg$expression_filter_mode, "any_nonzero")) {
+  tpm_eur <- tpm_eur %>%
+    mutate(
+      n_samples_tpm_ge_threshold = rowSums(
+        across(
+          all_of(eur_sample_cols),
+          ~ replace_na(.x, 0) > 0
+        )
+      ),
+      pass_expression_filter = n_samples_tpm_ge_threshold > 0
+    ) %>%
+    filter(pass_expression_filter) %>%
+    mutate(
+      gene_id_clean = strip_gene_version(.data[[gene_col]]),
+      mean_tpm = rowMeans(select(., all_of(eur_sample_cols)), na.rm = TRUE)
+    )
+} else {
+  stop("Unknown cfg$expression_filter_mode: ", cfg$expression_filter_mode)
+}
+
+tpm_eur <- tpm_eur %>%
   as.data.table()
-sanity_rows(tpm_eur, "EU TPM > 0 gene table", min_rows = 1000L)
+sanity_rows(tpm_eur, "EU expression-filtered gene table", min_rows = 1000L)
+sanity_check(
+  condition = n_eur_samples >= 10L,
+  pass_msg = paste0("EU sample columns in TPM: n = ", n_eur_samples),
+  fail_msg = "Too few EU samples matched TPM columns."
+)
+sanity_check(
+  condition = min_samples_required >= 1L && min_samples_required <= n_eur_samples,
+  pass_msg = paste0(
+    "Expression threshold requires >= ",
+    min_samples_required,
+    " of ",
+    n_eur_samples,
+    " EU samples."
+  ),
+  fail_msg = "Invalid minimum sample count derived for expression filtering."
+)
+if (identical(cfg$expression_filter_mode, "gtex_tpm")) {
+  sanity_check(
+    condition = all(tpm_eur$n_samples_tpm_ge_threshold >= min_samples_required),
+    pass_msg = paste0(
+      "GTEx-style TPM filter applied: TPM >= ",
+      cfg$gtex_tpm_threshold,
+      " in >= ",
+      min_samples_required,
+      " samples."
+    ),
+    fail_msg = "GTEx-style TPM filter sanity check failed."
+  )
+}
 
 expressing_gene_ids <- tpm_eur$gene_id_clean %>% unique()
 sanity_check(
@@ -1082,10 +1150,39 @@ sanity_check(
 writeLines(expressing_gene_ids, con = file.path(cfg$output_dir, "non_zero_eur_gene_ids.txt"))
 
 data.table(
-  metric = c("original_genes", "eur_nonzero_genes"),
-  value = c(nrow(tpm), nrow(tpm_eur))
+  metric = c(
+    "original_genes",
+    "eur_genes_after_expression_filter",
+    "eur_sample_n",
+    "expression_min_samples_required",
+    "expression_tpm_threshold",
+    "expression_sample_fraction_threshold"
+  ),
+  value = c(
+    nrow(tpm),
+    nrow(tpm_eur),
+    n_eur_samples,
+    min_samples_required,
+    cfg$gtex_tpm_threshold,
+    cfg$gtex_sample_frac_threshold
+  )
 ) %>%
   fwrite(file.path(cfg$output_dir, "expression_filter_counts.tsv"), sep = "\t")
+
+tibble(
+  setting = c(
+    "expression_filter_mode",
+    "gtex_reference_note",
+    "gtex_reference_url"
+  ),
+  value = c(
+    as.character(cfg$expression_filter_mode),
+    "GTEx eQTL pipeline uses TPM >= 0.1 in >= 20% samples (plus read-count filter when counts are available).",
+    "https://github.com/broadinstitute/gtex-pipeline/blob/master/qtl/README.md"
+  )
+) %>%
+  as.data.table() %>%
+  fwrite(file.path(cfg$output_dir, "expression_filter_method.tsv"), sep = "\t")
 
 # ----------------------- 2) HERITABILITY + S_HET TABLE ------------------------
 message("Step 3: merge heritability summary and s_het")
