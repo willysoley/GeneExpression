@@ -634,7 +634,7 @@ fwrite(
 repeat_profile_tbls <- repeat_filter_profiles %>%
   split(.$filter_set) %>%
   imap(function(profile_df, filter_set_name) {
-    profile_row <- profile_df %>% slice(1)
+    profile_row <- profile_df[1, , drop = FALSE]
     filtered_tbl <- apply_repeat_filter_profile(rmsk, profile_row)
     filtered_tbl %>%
       mutate(filter_set = filter_set_name)
