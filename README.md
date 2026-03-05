@@ -34,6 +34,7 @@ It builds a gene-level feature matrix and summary plots/tables for decile trends
 - `repeat_rmsk`: UCSC `rmsk` file
 - `chrom_info_tsv`: chromosome size table
 - `roadmap_links_dir`: local Roadmap link files (optional)
+- `shet_decile_col`: explicit decile column name in s_het Excel (if auto-detection is ambiguous)
 
 ### External defaults used if optional paths are `NULL`
 - ENCODE SCREEN enhancer BED (`GRCh38-cCREs.ELS.bed`)
@@ -46,7 +47,7 @@ It builds a gene-level feature matrix and summary plots/tables for decile trends
 1. Load SDRF and keep European GEUVADIS runs.
 2. Load TPM matrix and apply expression filter.
    - Default is GTEx-style TPM filter: `TPM >= 0.1` in `>=20%` of EU samples.
-3. Merge heritability summary with s_het table and build `post_mean_bin` (1-10).
+3. Merge heritability summary with s_het table and use the original s_het decile column as `post_mean_bin` (1-10).
 4. Build gene coordinates (S_het coords if available, otherwise GTF), then construct windows:
    - gene-centered: `100kb`, `250kb`, `500kb`, `1mb`
    - TSS-centered: `100kb`, `250kb`, `500kb`, `1mb`

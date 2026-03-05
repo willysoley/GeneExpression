@@ -24,6 +24,7 @@ cfg <- list(
   summary_tsv = "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260112_GREML_Nextflow_v2/results/summary/final_heritability_summary.tsv",
   shet_xlsx = "/gpfs/data/mostafavilab/shared_data/gene_information/s_het_info.xlsx",
   shet_sheet = "Supplementary Table 1",
+  shet_decile_col = NULL, # optional: explicit s_het decile column name from shet_xlsx
   tpm_tsv = "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_tpm.tsv",
   gene_gtf = "/gpfs/data/mostafavilab/shared_data/GENCODE_data/hg38/gencode.v48.annotation.gtf.gz",
   output_dir = "results/downstream_h2_regulatory_repeat",
@@ -295,6 +296,56 @@ if (!all(c("ensg", "post_mean") %in% names(shet_dt))) {
 shet_dt <- shet_dt %>%
   mutate(gene_id_clean = strip_gene_version(ensg))
 
+shet_decile_col <- detect_shet_decile_col(
+  dt = shet_dt,
+  preferred_col = cfg$shet_decile_col
+)
+if (is.na(shet_decile_col)) {
+  stop(
+    paste0(
+      "Could not detect s_het decile column in shet sheet. ",
+      "Set cfg$shet_decile_col explicitly. Available columns:\n- ",
+      paste(names(shet_dt), collapse = "\n- ")
+    )
+  )
+}
+message("Using original s_het decile column: ", shet_decile_col)
+
+shet_core <- shet_dt %>%
+  transmute(
+    gene_id_clean = gene_id_clean,
+    post_mean = suppressWarnings(as.numeric(post_mean)),
+    post_mean_bin = suppressWarnings(as.integer(round(as.numeric(.data[[shet_decile_col]]))))
+  ) %>%
+  filter(
+    !is.na(gene_id_clean),
+    gene_id_clean != "",
+    is.finite(post_mean),
+    !is.na(post_mean_bin),
+    post_mean_bin >= 1L,
+    post_mean_bin <= 10L
+  )
+
+shet_core_dups <- shet_core %>%
+  count(gene_id_clean, name = "n_rows") %>%
+  filter(n_rows > 1L) %>%
+  nrow()
+if (shet_core_dups > 0L) {
+  message("Collapsing duplicated s_het gene rows to first entry: n_genes = ", shet_core_dups)
+}
+
+shet_core <- shet_core %>%
+  distinct(gene_id_clean, .keep_all = TRUE)
+sanity_rows(shet_core, "s_het core table with original deciles", min_rows = 1000L)
+sanity_check(
+  condition = dplyr::n_distinct(shet_core$post_mean_bin) >= 5L,
+  pass_msg = paste0(
+    "Original s_het deciles available: n = ",
+    dplyr::n_distinct(shet_core$post_mean_bin)
+  ),
+  fail_msg = "Too few decile levels found in original s_het decile column."
+)
+
 shet_coord_cols <- detect_shet_coord_columns(shet_dt)
 shet_coord_dt <- NULL
 if (
@@ -334,9 +385,8 @@ if (
 }
 
 merged <- sum_dt %>%
-  left_join(select(shet_dt, gene_id_clean, post_mean), by = "gene_id_clean") %>%
-  filter(!is.na(post_mean), gene_id_clean %in% expressing_gene_ids) %>%
-  mutate(post_mean_bin = dplyr::ntile(post_mean, 10L))
+  left_join(shet_core, by = "gene_id_clean") %>%
+  filter(!is.na(post_mean), !is.na(post_mean_bin), gene_id_clean %in% expressing_gene_ids)
 
 if (nrow(merged) == 0L) {
   stop("No genes left after merging h2 + s_het and applying EU non-zero filter.")
