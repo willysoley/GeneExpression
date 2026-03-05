@@ -277,53 +277,6 @@ detect_shet_coord_columns <- function(dt) {
   )
 }
 
-detect_shet_decile_col <- function(dt, preferred_col = NULL) {
-  if (!is.null(preferred_col) && nzchar(preferred_col) && preferred_col %in% names(dt)) {
-    return(preferred_col)
-  }
-
-  candidate_names <- c(
-    "post_mean_decile",
-    "post_mean_bin",
-    "s_het_decile",
-    "shet_decile",
-    "decile",
-    "bin"
-  )
-  exact_candidates <- names(dt)[tolower(names(dt)) %in% tolower(candidate_names)]
-  if (length(exact_candidates) > 0L) {
-    return(exact_candidates[[1]])
-  }
-
-  is_valid_decile <- function(col_name) {
-    x <- suppressWarnings(as.numeric(dt[[col_name]]))
-    ok <- is.finite(x)
-    if (sum(ok) < 10L) {
-      return(FALSE)
-    }
-
-    u <- sort(unique(x[ok]))
-    length(u) >= 5L &&
-      length(u) <= 10L &&
-      all(abs(u - round(u)) < 1e-8) &&
-      min(u) >= 1 &&
-      max(u) <= 10
-  }
-
-  pattern_cols <- names(dt)[str_detect(tolower(names(dt)), "decile|_bin$|bin$")]
-  valid_pattern_cols <- pattern_cols[vapply(pattern_cols, is_valid_decile, logical(1))]
-  if (length(valid_pattern_cols) > 0L) {
-    return(valid_pattern_cols[[1]])
-  }
-
-  valid_any_cols <- names(dt)[vapply(names(dt), is_valid_decile, logical(1))]
-  if (length(valid_any_cols) == 1L) {
-    return(valid_any_cols[[1]])
-  }
-
-  NA_character_
-}
-
 safe_spearman <- function(x, y, label_x, label_y) {
   ok <- is.finite(x) & is.finite(y)
 
