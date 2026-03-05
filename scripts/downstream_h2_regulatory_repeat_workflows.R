@@ -796,6 +796,150 @@ generate_summary_plots <- function(
     }
   }
 
+  sine_subset_cols <- names(analysis_tbl) %>%
+    str_subset("^sine_name_.*_count_(100kb|250kb|500kb|1mb)$")
+
+  if (length(sine_subset_cols) > 0L) {
+    sine_subset_postmean_stats <- analysis_tbl %>%
+      select(post_mean_bin, all_of(sine_subset_cols)) %>%
+      pivot_longer(
+        cols = -post_mean_bin,
+        names_to = "sine_col",
+        values_to = "value"
+      ) %>%
+      mutate(
+        sine_subset = sine_col %>%
+          str_remove("^sine_name_") %>%
+          str_remove("_count_(100kb|250kb|500kb|1mb)$"),
+        window = sine_col %>%
+          str_extract("(100kb|250kb|500kb|1mb)$"),
+        window = factor(window, levels = c("100kb", "250kb", "500kb", "1mb"))
+      ) %>%
+      group_by(post_mean_bin, sine_subset, window) %>%
+      summarise(
+        mean_value = mean(value, na.rm = TRUE),
+        median_value = median(value, na.rm = TRUE),
+        prop_nonzero = mean(value > 0, na.rm = TRUE),
+        .groups = "drop"
+      )
+
+    fwrite(
+      as.data.table(sine_subset_postmean_stats),
+      file.path(output_dir, "postmean_bin_sine_subset_summary.tsv"),
+      sep = "\t"
+    )
+
+    spearman_rho <- function(x, y) {
+      ok <- is.finite(x) & is.finite(y)
+      if (sum(ok) < 3L || dplyr::n_distinct(y[ok]) < 2L) {
+        return(NA_real_)
+      }
+      suppressWarnings(cor(x[ok], y[ok], method = "spearman"))
+    }
+
+    spearman_p <- function(x, y) {
+      ok <- is.finite(x) & is.finite(y)
+      if (sum(ok) < 3L || dplyr::n_distinct(y[ok]) < 2L) {
+        return(NA_real_)
+      }
+      suppressWarnings(
+        tryCatch(
+          cor.test(x[ok], y[ok], method = "spearman", exact = FALSE)$p.value,
+          error = function(e) NA_real_
+        )
+      )
+    }
+
+    sine_subset_trend <- sine_subset_postmean_stats %>%
+      group_by(sine_subset, window) %>%
+      summarise(
+        rho_median = spearman_rho(post_mean_bin, median_value),
+        p_median = spearman_p(post_mean_bin, median_value),
+        rho_mean = spearman_rho(post_mean_bin, mean_value),
+        p_mean = spearman_p(post_mean_bin, mean_value),
+        mean_of_median = mean(median_value, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      mutate(
+        fdr_median = p.adjust(p_median, method = "BH"),
+        fdr_mean = p.adjust(p_mean, method = "BH"),
+        abs_rho_median = abs(rho_median),
+        abs_rho_mean = abs(rho_mean)
+      ) %>%
+      arrange(window, fdr_median, desc(abs_rho_median), desc(mean_of_median))
+
+    fwrite(
+      as.data.table(sine_subset_trend),
+      file.path(output_dir, "sine_subset_trend_stats.tsv"),
+      sep = "\t"
+    )
+
+    window_label_map <- c(
+      "100kb" = "100 kb",
+      "250kb" = "250 kb",
+      "500kb" = "500 kb",
+      "1mb" = "1 Mb"
+    )
+
+    for (window_label in names(window_label_map)) {
+      top_sine <- sine_subset_trend %>%
+        filter(window == window_label) %>%
+        arrange(fdr_median, desc(abs_rho_median), desc(mean_of_median)) %>%
+        dplyr::slice_head(n = 16) %>%
+        pull(sine_subset)
+
+      if (length(top_sine) == 0L) {
+        next
+      }
+
+      plot_dt <- sine_subset_postmean_stats %>%
+        filter(window == window_label, sine_subset %in% top_sine) %>%
+        select(post_mean_bin, sine_subset, mean_value, median_value) %>%
+        pivot_longer(
+          cols = c(mean_value, median_value),
+          names_to = "stat",
+          values_to = "value"
+        ) %>%
+        mutate(
+          stat = recode(
+            stat,
+            mean_value = "Mean",
+            median_value = "Median"
+          ),
+          sine_subset = factor(sine_subset, levels = top_sine)
+        )
+
+      p_sine_subset <- ggplot(
+        plot_dt,
+        aes(x = post_mean_bin, y = value, color = stat, group = stat)
+      ) +
+        geom_line(linewidth = 0.8) +
+        geom_point(size = 1.2) +
+        scale_x_continuous(breaks = 1:10) +
+        scale_color_manual(values = c("Mean" = "#3a86ff", "Median" = "#ff006e")) +
+        facet_wrap(~sine_subset, scales = "free_y", ncol = 4) +
+        labs(
+          title = paste0("Top SINE Subset Trends Across s_het Deciles (", window_label_map[[window_label]], " window)"),
+          subtitle = "Top subsets ranked by trend strength (Spearman on median counts)",
+          x = "s_het post_mean decile",
+          y = "SINE overlap count",
+          color = "Statistic"
+        ) +
+        theme_minimal(base_size = 11) +
+        theme(
+          legend.position = "top",
+          strip.text = element_text(size = 9)
+        )
+
+      ggsave(
+        filename = file.path(output_dir, "plots", paste0("postmean_sine_subset_trends_mean_median_", window_label, ".pdf")),
+        plot = p_sine_subset,
+        width = 18,
+        height = 12
+      )
+    }
+  }
+
   repeat_family_cols <- names(analysis_tbl) %>%
     str_subset("^repeat_family_.*_count_(100kb|250kb|500kb|1mb)$")
 
@@ -954,6 +1098,114 @@ generate_summary_plots <- function(
         plot = p_repeat_filtered,
         width = 18,
         height = 12
+      )
+    }
+  }
+
+  repeat_age_sets <- tibble(
+    repeat_class = c("LINE", "SINE", "LTR", "DNA"),
+    young_set = c(
+      "LINE_young_milliDiv200",
+      "SINE_young_milliDiv200",
+      "LTR_young_milliDiv200",
+      "DNA_young_milliDiv200"
+    ),
+    old_set = c(
+      "LINE_old_milliDiv200plus",
+      "SINE_old_milliDiv200plus",
+      "LTR_old_milliDiv200plus",
+      "DNA_old_milliDiv200plus"
+    )
+  )
+
+  window_levels <- c("100kb", "250kb", "500kb", "1mb")
+  window_label_map <- c(
+    "100kb" = "100 kb",
+    "250kb" = "250 kb",
+    "500kb" = "500 kb",
+    "1mb" = "1 Mb"
+  )
+
+  repeat_age_compare_list <- list()
+  for (i in seq_len(nrow(repeat_age_sets))) {
+    cls <- repeat_age_sets$repeat_class[[i]]
+    young_clean <- sanitize_name(repeat_age_sets$young_set[[i]])
+    old_clean <- sanitize_name(repeat_age_sets$old_set[[i]])
+
+    for (window_label in window_levels) {
+      young_col <- paste0("repeat_filt_", young_clean, "_count_", window_label)
+      old_col <- paste0("repeat_filt_", old_clean, "_count_", window_label)
+
+      if (!young_col %in% names(analysis_tbl) || !old_col %in% names(analysis_tbl)) {
+        next
+      }
+
+      comp_dt <- analysis_tbl %>%
+        transmute(
+          post_mean_bin = post_mean_bin,
+          young = as.numeric(.data[[young_col]]),
+          old = as.numeric(.data[[old_col]])
+        ) %>%
+        pivot_longer(
+          cols = c(young, old),
+          names_to = "age_group",
+          values_to = "value"
+        ) %>%
+        group_by(repeat_class = cls, window = window_label, age_group, post_mean_bin) %>%
+        summarise(
+          mean_value = mean(value, na.rm = TRUE),
+          median_value = median(value, na.rm = TRUE),
+          prop_nonzero = mean(value > 0, na.rm = TRUE),
+          .groups = "drop"
+        )
+
+      repeat_age_compare_list[[length(repeat_age_compare_list) + 1L]] <- comp_dt
+    }
+  }
+
+  repeat_age_compare <- bind_rows(repeat_age_compare_list)
+  if (nrow(repeat_age_compare) > 0L) {
+    fwrite(
+      as.data.table(repeat_age_compare),
+      file.path(output_dir, "postmean_repeat_young_old_summary.tsv"),
+      sep = "\t"
+    )
+
+    for (window_label in window_levels) {
+      plot_dt <- repeat_age_compare %>%
+        filter(window == window_label) %>%
+        mutate(
+          age_group = recode(age_group, young = "Young (<200 milliDiv)", old = "Old (>=200 milliDiv)")
+        )
+
+      if (nrow(plot_dt) == 0L) {
+        next
+      }
+
+      p_age_median <- ggplot(
+        plot_dt,
+        aes(x = post_mean_bin, y = median_value, color = age_group, group = age_group)
+      ) +
+        geom_line(linewidth = 0.9) +
+        geom_point(size = 1.5) +
+        scale_x_continuous(breaks = 1:10) +
+        scale_color_manual(values = c("Young (<200 milliDiv)" = "#1f77b4", "Old (>=200 milliDiv)" = "#d62728")) +
+        facet_wrap(~repeat_class, scales = "free_y", ncol = 2) +
+        labs(
+          title = paste0("Young vs Old Repeat Burden Across s_het Deciles (", window_label_map[[window_label]], " window)"),
+          subtitle = "Median counts per gene, split by milliDiv age proxy",
+          x = "s_het post_mean decile",
+          y = "Median repeat count",
+          color = "Age group"
+        ) +
+        theme_minimal(base_size = 12) +
+        theme(legend.position = "top")
+
+      ggsave(
+        filename = file.path(output_dir, "plots", paste0("postmean_repeat_young_vs_old_median_", window_label, ".pdf")),
+        plot = p_age_median,
+        width = 12,
+        height = 8
       )
     }
   }

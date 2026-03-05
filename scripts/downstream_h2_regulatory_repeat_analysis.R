@@ -57,8 +57,9 @@ cfg <- list(
   repeat_bg_repeat_fraction = 0.5,      # target genome repeat fraction for reference filter set
   repeat_bg_type_col = "repClass_norm", # column used for repeat composition in simulation
   repeat_bg_composition_basis = "bp",   # options: "bp", "count"
-  repeat_bg_n_iter = 100L,
-  repeat_bg_seed = 20260305L
+  repeat_bg_n_iter = 1000L,
+  repeat_bg_seed = 20260305L,
+  sine_subset_top_n = 40L
 )
 
 # Defaults are widely used public resources.
@@ -906,6 +907,78 @@ repeat_family_dt <- list(
 ) %>%
   purrr::reduce(left_join, by = "gene_id_clean")
 
+sine_top_n <- as.integer(cfg$sine_subset_top_n)
+if (!is.finite(sine_top_n) || sine_top_n < 1L) {
+  sine_top_n <- 40L
+}
+
+sine_top_names <- rmsk %>%
+  filter(
+    repClass_norm == "SINE",
+    !is.na(repName),
+    repName != ""
+  ) %>%
+  count(repName, sort = TRUE, name = "n_elements") %>%
+  dplyr::slice_head(n = sine_top_n) %>%
+  mutate(rank_abundance = row_number())
+
+fwrite(
+  as.data.table(sine_top_names),
+  file.path(cfg$output_dir, "sine_subtype_top_names.tsv"),
+  sep = "\t"
+)
+
+sine_subset_dt <- tibble(
+  gene_id_clean = mcols(gene_win_small)$gene_id_clean
+)
+
+if (nrow(sine_top_names) > 0L) {
+  sine_gr <- rep_gr[
+    mcols(rep_gr)$repClass == "SINE" &
+      mcols(rep_gr)$repName %in% sine_top_names$repName
+  ]
+
+  if (length(sine_gr) > 0L) {
+    sine_subset_dt <- list(
+      count_by_group(
+        window_gr = gene_win_small,
+        feature_gr = sine_gr,
+        feature_group = mcols(sine_gr)$repName,
+        prefix = "sine_name",
+        suffix = "_count_100kb"
+      ) %>%
+        as_tibble(),
+      count_by_group(
+        window_gr = gene_win_quarter,
+        feature_gr = sine_gr,
+        feature_group = mcols(sine_gr)$repName,
+        prefix = "sine_name",
+        suffix = "_count_250kb"
+      ) %>%
+        as_tibble(),
+      count_by_group(
+        window_gr = gene_win_mid,
+        feature_gr = sine_gr,
+        feature_group = mcols(sine_gr)$repName,
+        prefix = "sine_name",
+        suffix = "_count_500kb"
+      ) %>%
+        as_tibble(),
+      count_by_group(
+        window_gr = gene_win_cis,
+        feature_gr = sine_gr,
+        feature_group = mcols(sine_gr)$repName,
+        prefix = "sine_name",
+        suffix = "_count_1mb"
+      ) %>%
+        as_tibble()
+    ) %>%
+      purrr::reduce(left_join, by = "gene_id_clean")
+  }
+}
+
+sanity_rows(sine_subset_dt, "SINE subtype feature table", min_rows = 1000L)
+
 # --------------------------- 6) FINAL ANALYSIS TABLE --------------------------
 analysis_dt <- merged %>%
   left_join(
@@ -928,10 +1001,11 @@ analysis_dt <- merged %>%
   left_join(as_tibble(repeat_features), by = "gene_id_clean") %>%
   left_join(repeat_profile_dt, by = "gene_id_clean") %>%
   left_join(repeat_class_dt, by = "gene_id_clean") %>%
-  left_join(repeat_family_dt, by = "gene_id_clean")
+  left_join(repeat_family_dt, by = "gene_id_clean") %>%
+  left_join(sine_subset_dt, by = "gene_id_clean")
 
 count_cols <- names(analysis_dt) %>%
-  str_subset("^(enh_count_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_family_|repeat_filt_|repeat_[A-Za-z0-9_]+_count(_(100kb|250kb|500kb|1mb))?$)")
+  str_subset("^(enh_count_|enh_overlap_|open_count_|open_overlap_|repeat_count_|repeat_overlap_|repeat_class_|repeat_family_|repeat_filt_|repeat_[A-Za-z0-9_]+_count(_(100kb|250kb|500kb|1mb))?$|sine_name_[A-Za-z0-9_]+_count_(100kb|250kb|500kb|1mb)$)")
 
 if (length(count_cols) > 0L) {
   analysis_dt <- analysis_dt %>%

@@ -731,14 +731,16 @@ build_log_terms <- function(dt, columns) {
 build_repeat_filter_profiles <- function() {
   # Literature-inspired defaults:
   # - Nat Genet rMEI methods commonly use LINE/SINE/SVA with milliDiv < 200.
+  # - Older copies are often operationalized as higher-divergence copies (>= 200 milliDiv).
   # - TE-focused analyses often keep interspersed TE classes and exclude low-complexity/simple repeats.
   # - Genome Research TEMR analyses commonly require minimum repeat size >= 100 bp.
   tibble::tribble(
-    ~filter_set, ~include_class_regex, ~include_family_regex, ~exclude_class_regex, ~max_milliDiv, ~min_len_bp, ~source_note, ~source_url,
+    ~filter_set, ~include_class_regex, ~include_family_regex, ~exclude_class_regex, ~max_milliDiv, ~min_milliDiv, ~min_len_bp, ~source_note, ~source_url,
     "te_core_interspersed",
     "^(LINE|SINE|LTR|DNA|RC|Retroposon)$",
     NA_character_,
     "^(Simple_repeat|Low_complexity|Satellite|RNA|rRNA|scRNA|snRNA|srpRNA|tRNA)$",
+    NA_real_,
     NA_real_,
     100,
     "TE-core interspersed classes; drop simple/low-complexity style classes",
@@ -748,6 +750,7 @@ build_repeat_filter_profiles <- function() {
     NA_character_,
     NA_character_,
     200,
+    NA_real_,
     100,
     "Nat Genet rMEI-style young/intermediate divergence threshold",
     "https://www.nature.com/articles/s41588-023-01390-2",
@@ -756,6 +759,7 @@ build_repeat_filter_profiles <- function() {
     NA_character_,
     NA_character_,
     200,
+    NA_real_,
     100,
     "Nat Genet rMEI-style young/intermediate divergence threshold",
     "https://www.nature.com/articles/s41588-023-01390-2",
@@ -764,6 +768,7 @@ build_repeat_filter_profiles <- function() {
     "^SVA",
     NA_character_,
     200,
+    NA_real_,
     100,
     "Nat Genet rMEI-style SVA-focused divergence threshold",
     "https://www.nature.com/articles/s41588-023-01390-2",
@@ -772,6 +777,7 @@ build_repeat_filter_profiles <- function() {
     NA_character_,
     NA_character_,
     200,
+    NA_real_,
     100,
     "Young LTR-focused set with same divergence scale",
     "https://www.nature.com/articles/s41588-023-01390-2",
@@ -780,9 +786,46 @@ build_repeat_filter_profiles <- function() {
     NA_character_,
     NA_character_,
     200,
+    NA_real_,
     100,
     "Young DNA transposon-focused set with same divergence scale",
-    "https://www.nature.com/articles/s41588-023-01390-2"
+    "https://www.nature.com/articles/s41588-023-01390-2",
+    "LINE_old_milliDiv200plus",
+    "^LINE$",
+    NA_character_,
+    NA_character_,
+    NA_real_,
+    200,
+    100,
+    "High-divergence LINE copies as older set (complement to <200 young threshold)",
+    "https://www.repeatmasker.org/dev/webrepeatmaskerhelp.html",
+    "SINE_old_milliDiv200plus",
+    "^SINE$",
+    NA_character_,
+    NA_character_,
+    NA_real_,
+    200,
+    100,
+    "High-divergence SINE copies as older set (complement to <200 young threshold)",
+    "https://www.repeatmasker.org/dev/webrepeatmaskerhelp.html",
+    "LTR_old_milliDiv200plus",
+    "^LTR$",
+    NA_character_,
+    NA_character_,
+    NA_real_,
+    200,
+    100,
+    "High-divergence LTR copies as older set (complement to <200 young threshold)",
+    "https://www.repeatmasker.org/dev/webrepeatmaskerhelp.html",
+    "DNA_old_milliDiv200plus",
+    "^DNA$",
+    NA_character_,
+    NA_character_,
+    NA_real_,
+    200,
+    100,
+    "High-divergence DNA transposon copies as older set (complement to <200 young threshold)",
+    "https://www.repeatmasker.org/dev/webrepeatmaskerhelp.html"
   ) %>%
     mutate(
       filter_set = as.character(filter_set),
@@ -790,6 +833,7 @@ build_repeat_filter_profiles <- function() {
       include_family_regex = as.character(include_family_regex),
       exclude_class_regex = as.character(exclude_class_regex),
       max_milliDiv = as.numeric(max_milliDiv),
+      min_milliDiv = as.numeric(min_milliDiv),
       min_len_bp = as.integer(min_len_bp),
       source_note = as.character(source_note),
       source_url = as.character(source_url)
@@ -817,6 +861,11 @@ apply_repeat_filter_profile <- function(rmsk_tbl, profile_row) {
   if (!is.na(profile_row$max_milliDiv) && is.finite(profile_row$max_milliDiv)) {
     out <- out %>%
       filter(is.finite(milliDiv), milliDiv <= profile_row$max_milliDiv)
+  }
+
+  if (!is.na(profile_row$min_milliDiv) && is.finite(profile_row$min_milliDiv)) {
+    out <- out %>%
+      filter(is.finite(milliDiv), milliDiv >= profile_row$min_milliDiv)
   }
 
   if (!is.na(profile_row$min_len_bp) && is.finite(profile_row$min_len_bp)) {
