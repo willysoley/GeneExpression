@@ -70,6 +70,22 @@ stop_if_missing <- function(path, label) {
   }
 }
 
+sanity_check <- function(condition, pass_msg, fail_msg) {
+  if (!isTRUE(condition)) {
+    stop(fail_msg)
+  }
+  message("[Sanity] ", pass_msg)
+}
+
+sanity_rows <- function(df, label, min_rows = 1L) {
+  n <- nrow(df)
+  sanity_check(
+    condition = is.finite(n) && n >= min_rows,
+    pass_msg = paste0(label, ": n = ", format(n, big.mark = ",")),
+    fail_msg = paste0(label, " has too few rows: n = ", n, " (expected >= ", min_rows, ").")
+  )
+}
+
 resolve_first_existing <- function(paths, label) {
   existing <- paths[file.exists(paths)]
 
@@ -756,7 +772,7 @@ build_window_enhancer_features <- function(
       enh_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, enh_gr, ignore.strand = TRUE))
     )
   ) %>%
-    reduce(left_join, by = "gene_id_clean") %>%
+    purrr::reduce(left_join, by = "gene_id_clean") %>%
     as.data.table()
 
   list(features = feature_dt, enhancer_gr = enh_gr)
@@ -995,6 +1011,7 @@ sdrf <- fread(cfg$sdrf_url) %>%
     names(.) <- make.unique(names(.))
     .
   }
+sanity_rows(sdrf, "SDRF table", min_rows = 10L)
 
 ancestry_col <- "Characteristics[ancestry category]"
 run_col <- "Comment[ENA_RUN]"
@@ -1015,11 +1032,17 @@ eur_runs <- sdrf %>%
 if (length(eur_runs) == 0L) {
   stop("No European runs found in SDRF with the configured population labels.")
 }
+sanity_check(
+  condition = length(eur_runs) >= 10L,
+  pass_msg = paste0("European runs detected: n = ", length(eur_runs)),
+  fail_msg = "Too few European runs detected; check cfg$eur_pops and SDRF labels."
+)
 
 message("Step 2: load TPM and keep genes with TPM > 0 in at least one EU sample")
 stop_if_missing(cfg$tpm_tsv, "TPM matrix")
 
 tpm <- fread(cfg$tpm_tsv)
+sanity_rows(tpm, "TPM matrix", min_rows = 1000L)
 
 gene_col <- intersect(c("gene_id", "Gene", "feature_id", "gene"), names(tpm))[1]
 if (is.na(gene_col)) {
@@ -1047,8 +1070,14 @@ tpm_eur <- tpm_eur %>%
     mean_tpm = rowMeans(select(., all_of(eur_sample_cols)), na.rm = TRUE)
   ) %>%
   as.data.table()
+sanity_rows(tpm_eur, "EU TPM > 0 gene table", min_rows = 1000L)
 
 expressing_gene_ids <- tpm_eur$gene_id_clean %>% unique()
+sanity_check(
+  condition = length(expressing_gene_ids) > 0L,
+  pass_msg = paste0("Expressed genes retained: n = ", length(expressing_gene_ids)),
+  fail_msg = "No expressed genes were retained after TPM filtering."
+)
 
 writeLines(expressing_gene_ids, con = file.path(cfg$output_dir, "non_zero_eur_gene_ids.txt"))
 
@@ -1067,9 +1096,11 @@ sum_dt <- fread(cfg$summary_tsv) %>%
   as_tibble() %>%
   select(Gene, h2_GREML, SE_GREML, Pval_GREML) %>%
   mutate(gene_id_clean = strip_gene_version(Gene))
+sanity_rows(sum_dt, "Heritability summary table", min_rows = 1000L)
 
 shet_dt <- read_xlsx(cfg$shet_xlsx, sheet = cfg$shet_sheet) %>%
   as_tibble()
+sanity_rows(shet_dt, "s_het table", min_rows = 1000L)
 
 if (!all(c("ensg", "post_mean") %in% names(shet_dt))) {
   stop("s_het sheet must include columns named 'ensg' and 'post_mean'.")
@@ -1124,6 +1155,12 @@ merged <- sum_dt %>%
 if (nrow(merged) == 0L) {
   stop("No genes left after merging h2 + s_het and applying EU non-zero filter.")
 }
+sanity_rows(merged, "Merged h2 + s_het + expression table", min_rows = 1000L)
+sanity_check(
+  condition = dplyr::n_distinct(merged$post_mean_bin) >= 5L,
+  pass_msg = paste0("post_mean bins present: n = ", dplyr::n_distinct(merged$post_mean_bin)),
+  fail_msg = "Too few post_mean bins available after merge; inspect post_mean distribution."
+)
 
 tpm_means <- tpm_eur %>%
   as_tibble() %>%
@@ -1147,6 +1184,11 @@ gtf_path <- resolve_first_existing(
 message("Using gene annotation: ", gtf_path)
 
 gtf <- import(gtf_path)
+sanity_check(
+  condition = length(gtf) > 0L,
+  pass_msg = paste0("Imported GTF entries: n = ", format(length(gtf), big.mark = ",")),
+  fail_msg = "Imported GTF is empty."
+)
 
 gene_gr <- gtf[gtf$type == "gene"] %>%
   keepStandardChromosomes(pruning.mode = "coarse") %>%
@@ -1198,6 +1240,7 @@ if (!is.null(shet_coord_dt) && nrow(shet_coord_dt) > 0L) {
 if (nrow(gene_tbl) == 0L) {
   stop("No gene coordinates matched merged gene IDs. Check gene ID format and GTF build.")
 }
+sanity_rows(gene_tbl, "Gene coordinate table", min_rows = 1000L)
 
 tss_pos <- ifelse(gene_tbl$strand == "-", gene_tbl$end, gene_tbl$start)
 
@@ -1235,6 +1278,14 @@ gene_window_widths <- tibble(
 
 gene_tbl <- gene_tbl %>%
   left_join(gene_window_widths, by = "gene_id_clean")
+sanity_check(
+  condition = all(gene_tbl$gene_window_bp_100kb > 0, na.rm = TRUE) &&
+    all(gene_tbl$gene_window_bp_250kb > 0, na.rm = TRUE) &&
+    all(gene_tbl$gene_window_bp_500kb > 0, na.rm = TRUE) &&
+    all(gene_tbl$gene_window_bp_1mb > 0, na.rm = TRUE),
+  pass_msg = "Gene window widths are positive for all configured windows.",
+  fail_msg = "One or more gene window widths are non-positive."
+)
 
 # ----------------------- 4) REGULATORY FEATURE COUNTS -------------------------
 message("Step 5: build enhancer and open-chromatin features")
@@ -1257,6 +1308,12 @@ enh_window_obj <- build_window_enhancer_features(
 )
 enh_count_features <- enh_window_obj$features
 enh_gr <- enh_window_obj$enhancer_gr
+sanity_check(
+  condition = length(enh_gr) > 0L,
+  pass_msg = paste0("Enhancer intervals loaded: n = ", format(length(enh_gr), big.mark = ",")),
+  fail_msg = "Enhancer interval object is empty."
+)
+sanity_rows(enh_count_features, "Enhancer feature table", min_rows = 1000L)
 
 if (identical(cfg$enhancer_source, "roadmap_links")) {
   message("Enhancer mode requested: roadmap_links. Active-biosample metrics disabled; using fixed-window enhancer counts.")
@@ -1297,10 +1354,16 @@ open_features <- list(
     open_overlap_gene_body_n = as.integer(countOverlaps(gene_body_gr, open_gr, ignore.strand = TRUE))
   )
 ) %>%
-  reduce(left_join, by = "gene_id_clean")
+  purrr::reduce(left_join, by = "gene_id_clean")
 
 reg_features <- reg_features %>%
   left_join(open_features, by = "gene_id_clean")
+sanity_check(
+  condition = length(open_gr) > 0L,
+  pass_msg = paste0("Open chromatin intervals loaded: n = ", format(length(open_gr), big.mark = ",")),
+  fail_msg = "Open chromatin interval object is empty."
+)
+sanity_rows(reg_features, "Regulatory feature table", min_rows = 1000L)
 
 # ------------------------ 5) UCSC REPEATMASKER COUNTS -------------------------
 message("Step 6: load UCSC RepeatMasker annotations and summarize repeats")
@@ -1317,6 +1380,7 @@ rmsk <- fread(rmsk_path, sep = "\t", header = FALSE, showProgress = TRUE)
 if (ncol(rmsk) < 17L) {
   stop("Unexpected rmsk format. Expected at least 17 columns.")
 }
+sanity_rows(rmsk, "Raw rmsk table", min_rows = 10000L)
 
 names(rmsk)[1:17] <- c(
   "bin", "swScore", "milliDiv", "milliDel", "milliIns", "genoName", "genoStart",
@@ -1341,6 +1405,7 @@ rmsk <- rmsk %>%
     is.finite(rep_len_bp),
     rep_len_bp > 0
   )
+sanity_rows(rmsk, "Filtered rmsk table", min_rows = 10000L)
 
 rep_gr <- GRanges(
   seqnames = rmsk$genoName,
@@ -1406,6 +1471,11 @@ repeat_profile_stats <- repeat_profile_tbls %>%
     by = "filter_set"
   ) %>%
   arrange(desc(n_elements))
+sanity_check(
+  condition = nrow(repeat_profile_stats) > 0L && any(repeat_profile_stats$n_elements > 0, na.rm = TRUE),
+  pass_msg = "At least one repeat filter set has non-zero elements.",
+  fail_msg = "All repeat filter sets are empty; revise filter criteria."
+)
 
 fwrite(
   as.data.table(repeat_profile_stats),
@@ -1444,7 +1514,7 @@ repeat_profile_feature_tbls <- repeat_profile_tbls %>%
   })
 
 repeat_profile_dt <- repeat_profile_feature_tbls %>%
-  reduce(left_join, by = "gene_id_clean")
+  purrr::reduce(left_join, by = "gene_id_clean")
 
 repeat_profile_chr_stats <- repeat_profile_tbls %>%
   imap_dfr(function(tbl, filter_set_name) {
@@ -1507,7 +1577,7 @@ repeat_class_dt <- list(
   ) %>%
     as_tibble()
 ) %>%
-  reduce(left_join, by = "gene_id_clean")
+  purrr::reduce(left_join, by = "gene_id_clean")
 
 repeat_count_class_cols <- names(repeat_class_dt) %>%
   str_subset("^repeat_class_.*_count_100kb$")
@@ -1629,7 +1699,7 @@ repeat_family_dt <- list(
   ) %>%
     as_tibble()
 ) %>%
-  reduce(left_join, by = "gene_id_clean")
+  purrr::reduce(left_join, by = "gene_id_clean")
 
 # --------------------------- 6) FINAL ANALYSIS TABLE --------------------------
 analysis_dt <- merged %>%
@@ -1667,6 +1737,11 @@ if (length(count_cols) > 0L) {
       )
     )
 }
+sanity_check(
+  condition = nrow(analysis_dt) == nrow(merged),
+  pass_msg = paste0("Final analysis table rows match merged genes: n = ", nrow(analysis_dt)),
+  fail_msg = "Final analysis table row count does not match merged gene table."
+)
 
 fwrite(as.data.table(analysis_dt), file.path(cfg$output_dir, "gene_level_features.tsv"), sep = "\t")
 
@@ -1707,11 +1782,22 @@ repeat_background_iter <- tibble(
   filter_set = character(0),
   filter_set_clean = character(0),
   window = character(0),
+  seed_used = integer(0),
   iter = integer(0),
   post_mean_bin = integer(0),
   bg_mean = numeric(0),
   bg_median = numeric(0),
   bg_prop_nonzero = numeric(0)
+)
+
+repeat_bg_seed_map <- tibble(
+  filter_set = character(0),
+  filter_set_clean = character(0),
+  window = character(0),
+  seed_used = integer(0),
+  n_iter = integer(0),
+  seed_base = integer(0),
+  seed_strategy = character(0)
 )
 
 if (length(repeat_filt_cols) > 0L) {
@@ -1751,6 +1837,7 @@ if (length(repeat_filt_cols) > 0L) {
   )
 
   chrom_sizes_dt <- load_chrom_sizes(cfg, rmsk)
+  sanity_rows(chrom_sizes_dt, "Chromosome size table", min_rows = 20L)
   fwrite(
     as.data.table(chrom_sizes_dt),
     file.path(cfg$output_dir, "chrom_sizes_used.tsv"),
@@ -1759,7 +1846,26 @@ if (length(repeat_filt_cols) > 0L) {
 
   if (isTRUE(as.integer(cfg$repeat_bg_n_iter) > 0L)) {
     message("Running ", cfg$repeat_bg_n_iter, " genomic-background simulations per filter set and window.")
+    repeat_bg_seed_info <- tibble(
+      parameter = c(
+        "repeat_bg_seed_base",
+        "repeat_bg_n_iter",
+        "seed_strategy"
+      ),
+      value = c(
+        as.character(cfg$repeat_bg_seed),
+        as.character(cfg$repeat_bg_n_iter),
+        "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop"
+      )
+    )
+    fwrite(
+      as.data.table(repeat_bg_seed_info),
+      file.path(cfg$output_dir, "repeat_background_seed_info.tsv"),
+      sep = "\t"
+    )
+
     bg_iter_tbls <- list()
+    seed_map_tbls <- list()
     sim_idx <- 0L
 
     for (row_idx in seq_len(nrow(repeat_filter_map))) {
@@ -1800,24 +1906,54 @@ if (length(repeat_filt_cols) > 0L) {
           filter(!is.na(post_mean_bin))
 
         sim_idx <- sim_idx + 1L
+        seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx
+
+        seed_map_tbls[[length(seed_map_tbls) + 1L]] <- tibble(
+          filter_set = filter_set_name,
+          filter_set_clean = filter_clean,
+          window = window_label,
+          seed_used = as.integer(seed_used),
+          n_iter = as.integer(cfg$repeat_bg_n_iter),
+          seed_base = as.integer(cfg$repeat_bg_seed),
+          seed_strategy = "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop"
+        )
+
         bg_iter <- simulate_poisson_background(
           sim_input = sim_input,
           n_iter = as.integer(cfg$repeat_bg_n_iter),
-          seed = as.integer(cfg$repeat_bg_seed) + sim_idx
+          seed = as.integer(seed_used)
         ) %>%
           mutate(
             filter_set = filter_set_name,
             filter_set_clean = filter_clean,
-            window = window_label
+            window = window_label,
+            seed_used = as.integer(seed_used)
           )
 
         bg_iter_tbls[[length(bg_iter_tbls) + 1L]] <- bg_iter
       }
     }
 
+    if (length(seed_map_tbls) > 0L) {
+      repeat_bg_seed_map <- bind_rows(seed_map_tbls) %>%
+        arrange(filter_set, window)
+
+      sanity_check(
+        condition = n_distinct(repeat_bg_seed_map$seed_used) == nrow(repeat_bg_seed_map),
+        pass_msg = "Background seeds are unique across filter/window simulation runs.",
+        fail_msg = "Duplicate background seeds detected across filter/window runs."
+      )
+
+      fwrite(
+        as.data.table(repeat_bg_seed_map),
+        file.path(cfg$output_dir, "repeat_background_seed_map.tsv"),
+        sep = "\t"
+      )
+    }
+
     if (length(bg_iter_tbls) > 0L) {
       repeat_background_iter <- bind_rows(bg_iter_tbls) %>%
-        arrange(filter_set, window, iter, post_mean_bin)
+        arrange(filter_set, window, seed_used, iter, post_mean_bin)
 
       fwrite(
         as.data.table(repeat_background_iter),
@@ -1910,6 +2046,7 @@ if (nrow(repeat_background_iter) > 0L && nrow(repeat_filt_observed_summary) > 0L
     file.path(cfg$output_dir, "postmean_repeat_filtered_enrichment.tsv"),
     sep = "\t"
   )
+  sanity_rows(repeat_filtered_enrichment, "Filtered repeat enrichment summary", min_rows = 10L)
 }
 
 # ----------------------------- 7) SUMMARIES -----------------------------------
