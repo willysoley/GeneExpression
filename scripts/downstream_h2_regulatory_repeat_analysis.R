@@ -1118,17 +1118,22 @@ if (length(repeat_filt_cols) > 0L) {
     } else {
       reference_fraction <- reference_fraction[[1]]
     }
+    reference_scale <- if (
+      is.finite(reference_fraction) &&
+        reference_fraction > 0 &&
+        is.finite(as.numeric(cfg$repeat_bg_repeat_fraction))
+    ) {
+      as.numeric(cfg$repeat_bg_repeat_fraction) / reference_fraction
+    } else {
+      0
+    }
 
     sim_plan <- filter_bp_dt %>%
       mutate(
         reference_filter_set = reference_filter_set,
         target_fraction = pmin(
           0.95,
-          if_else(
-            is.finite(reference_fraction) & reference_fraction > 0,
-            as.numeric(cfg$repeat_bg_repeat_fraction) * (observed_fraction / reference_fraction),
-            0
-          )
+          pmax(0, observed_fraction * reference_scale)
         ),
         repeat_bg_method = bg_method,
         type_col = as.character(cfg$repeat_bg_type_col),
