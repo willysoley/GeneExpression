@@ -61,7 +61,7 @@ defaults <- list(
   rmsk_url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/rmsk.txt.gz",
   chrom_info_url = "https://hgdownload.soe.ucsc.edu/goldenPath/hg38/database/chromInfo.txt.gz"
 )
-standard_chr <- paste0("chr", c(1:22, "X", "Y", "M", "MT"))
+standard_chr <- paste0("chr", c(1:22, "X", "Y"))
 
 # ------------------------------ HELPERS ---------------------------------------
 stop_if_missing <- function(path, label) {
