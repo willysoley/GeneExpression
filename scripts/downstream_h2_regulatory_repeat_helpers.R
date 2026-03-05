@@ -980,7 +980,11 @@ build_repeat_sim_catalog <- function(repeat_tbl, chrom_sizes_dt, type_col = "rep
       .groups = "drop"
     ) %>%
     mutate(
-      comp_weight = if_else(composition_basis == "count", as.numeric(obs_n), as.numeric(obs_bp)),
+      comp_weight = if (identical(composition_basis, "count")) {
+        as.numeric(obs_n)
+      } else {
+        as.numeric(obs_bp)
+      },
       type_prob = comp_weight / sum(comp_weight, na.rm = TRUE)
     )
 
@@ -993,7 +997,11 @@ build_repeat_sim_catalog <- function(repeat_tbl, chrom_sizes_dt, type_col = "rep
     ) %>%
     group_by(repeat_type) %>%
     mutate(
-      chrom_weight = if_else(composition_basis == "count", as.numeric(obs_n), as.numeric(obs_bp)),
+      chrom_weight = if (identical(composition_basis, "count")) {
+        as.numeric(obs_n)
+      } else {
+        as.numeric(obs_bp)
+      },
       chrom_prob = chrom_weight / sum(chrom_weight, na.rm = TRUE)
     ) %>%
     ungroup()
