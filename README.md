@@ -15,6 +15,7 @@ It builds a gene-level feature matrix and summary plots/tables for decile trends
 ## Repository Objects
 ### Core code
 - `scripts/downstream_h2_regulatory_repeat_analysis.R`
+- `scripts/downstream_h2_regulatory_repeat_helpers.R`
 
 ### Documentation
 - `docs/how_to_run_downstream_analysis.md`
