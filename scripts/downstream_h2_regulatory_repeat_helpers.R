@@ -944,6 +944,32 @@ load_chrom_sizes <- function(cfg, rmsk_tbl) {
     distinct(chr, .keep_all = TRUE)
 }
 
+summarize_overlap_counts_by_bin <- function(count_vec, bin_vec) {
+  ok <- !is.na(bin_vec) & is.finite(bin_vec)
+
+  if (!any(ok)) {
+    return(tibble(
+      post_mean_bin = integer(0),
+      bg_mean = numeric(0),
+      bg_median = numeric(0),
+      bg_prop_nonzero = numeric(0)
+    ))
+  }
+
+  split_counts <- split(
+    as.numeric(count_vec[ok]),
+    as.integer(bin_vec[ok])
+  )
+
+  tibble(
+    post_mean_bin = names(split_counts) %>% as.integer(),
+    bg_mean = split_counts %>% vapply(mean, numeric(1), na.rm = TRUE),
+    bg_median = split_counts %>% vapply(median, numeric(1), na.rm = TRUE),
+    bg_prop_nonzero = split_counts %>% vapply(function(x) mean(x > 0, na.rm = TRUE), numeric(1))
+  ) %>%
+    arrange(post_mean_bin)
+}
+
 simulate_poisson_background <- function(sim_input, n_iter, seed) {
   if (nrow(sim_input) == 0L || n_iter <= 0L) {
     return(tibble(

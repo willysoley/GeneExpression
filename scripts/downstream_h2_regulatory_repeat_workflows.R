@@ -142,11 +142,27 @@ run_repeat_background_analysis <- function(
         stop("Unknown cfg$repeat_bg_method: ", bg_method)
       }
 
+      detected_cores <- suppressWarnings(parallel::detectCores(logical = FALSE))
+      if (!is.finite(detected_cores) || detected_cores < 1L) {
+        detected_cores <- 1L
+      }
+      requested_cores <- as.integer(cfg$repeat_bg_n_cores)
+      if (!is.finite(requested_cores) || requested_cores < 1L) {
+        requested_cores <- 1L
+      }
+      bg_n_cores <- min(requested_cores, detected_cores)
+      if (.Platform$OS.type != "unix") {
+        bg_n_cores <- 1L
+        message("Parallel background simulation is enabled only on Unix-like systems; using 1 core.")
+      }
+
       message(
         "Running ",
         cfg$repeat_bg_n_iter,
         " genomic-background simulations per filter set and window (method = ",
         bg_method,
+        ", cores = ",
+        bg_n_cores,
         ")."
       )
 
@@ -155,6 +171,7 @@ run_repeat_background_analysis <- function(
           "repeat_bg_method",
           "repeat_bg_seed_base",
           "repeat_bg_n_iter",
+          "repeat_bg_n_cores",
           "repeat_bg_repeat_fraction",
           "repeat_bg_type_col",
           "repeat_bg_composition_basis",
@@ -164,10 +181,11 @@ run_repeat_background_analysis <- function(
           bg_method,
           as.character(cfg$repeat_bg_seed),
           as.character(cfg$repeat_bg_n_iter),
+          as.character(bg_n_cores),
           as.character(cfg$repeat_bg_repeat_fraction),
           as.character(cfg$repeat_bg_type_col),
           as.character(cfg$repeat_bg_composition_basis),
-          "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop"
+          "explicit_genome: seed_used = repeat_bg_seed_base + (filter_row_index - 1) * repeat_bg_n_iter + iteration_index; poisson_window: seed_used = repeat_bg_seed_base + (task_index - 1)"
         )
       )
       fwrite(
@@ -184,6 +202,18 @@ run_repeat_background_analysis <- function(
         as_tibble() %>%
         select(gene_id_clean, post_mean_bin) %>%
         distinct(gene_id_clean, .keep_all = TRUE)
+
+      gene_decile_lookup <- setNames(
+        as.integer(gene_decile_map$post_mean_bin),
+        as.character(gene_decile_map$gene_id_clean)
+      )
+      window_decile_vecs <- gene_window_list %>%
+        imap(function(window_gr, window_label) {
+          gene_ids <- mcols(window_gr)$gene_id_clean %>%
+            as.character()
+          gene_decile_lookup[gene_ids] %>%
+            as.integer()
+        })
 
       genome_bp <- sum(chrom_sizes_dt$chrom_size, na.rm = TRUE)
       filter_bp_dt <- repeat_profile_tbls %>%
@@ -251,114 +281,139 @@ run_repeat_background_analysis <- function(
       n_iter_bg <- as.integer(cfg$repeat_bg_n_iter)
 
       if (identical(bg_method, "explicit_genome")) {
-        for (row_idx in seq_len(nrow(repeat_filter_map))) {
-          filter_set_name <- repeat_filter_map$filter_set[[row_idx]]
-          filter_clean <- repeat_filter_map$filter_set_clean[[row_idx]]
-          source_tbl <- repeat_profile_tbls[[filter_set_name]] %>%
-            as_tibble()
+        explicit_task_idx <- seq_len(nrow(repeat_filter_map))
+        explicit_results <- parallel::mclapply(
+          explicit_task_idx,
+          function(row_idx) {
+            filter_set_name <- repeat_filter_map$filter_set[[row_idx]]
+            filter_clean <- repeat_filter_map$filter_set_clean[[row_idx]]
+            source_tbl <- repeat_profile_tbls[[filter_set_name]] %>%
+              as_tibble()
 
-          plan_row <- sim_plan %>%
-            filter(filter_set == filter_set_name) %>%
-            dplyr::slice_head(n = 1)
-          if (nrow(plan_row) == 0L) {
-            next
-          }
+            plan_row <- sim_plan %>%
+              filter(filter_set == filter_set_name) %>%
+              dplyr::slice_head(n = 1)
+            if (nrow(plan_row) == 0L) {
+              return(list(bg = tibble(), seed = tibble()))
+            }
 
-          target_fraction_set <- as.numeric(plan_row$target_fraction[[1]])
-          if (!is.finite(target_fraction_set) || target_fraction_set <= 0 || nrow(source_tbl) == 0L) {
-            next
-          }
+            target_fraction_set <- as.numeric(plan_row$target_fraction[[1]])
+            if (!is.finite(target_fraction_set) || target_fraction_set <= 0 || nrow(source_tbl) == 0L) {
+              return(list(bg = tibble(), seed = tibble()))
+            }
 
-          catalog <- build_repeat_sim_catalog(
-            repeat_tbl = source_tbl,
-            chrom_sizes_dt = chrom_sizes_dt,
-            type_col = as.character(cfg$repeat_bg_type_col),
-            composition_basis = as.character(cfg$repeat_bg_composition_basis)
-          )
-          if (catalog$source_n == 0L) {
-            next
-          }
-
-          for (iter_idx in seq_len(n_iter_bg)) {
-            message(
-              "[Background][", filter_set_name, "] iteration ",
-              iter_idx, "/", n_iter_bg
-            )
-            sim_idx <- sim_idx + 1L
-            seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx
-
-            sim_dt <- simulate_repeat_genome_dt(
-              catalog = catalog,
+            catalog <- build_repeat_sim_catalog(
+              repeat_tbl = source_tbl,
               chrom_sizes_dt = chrom_sizes_dt,
-              repeat_fraction = target_fraction_set,
-              seed = as.integer(seed_used)
+              type_col = as.character(cfg$repeat_bg_type_col),
+              composition_basis = as.character(cfg$repeat_bg_composition_basis)
             )
-            if (nrow(sim_dt) == 0L) {
-              next
+            if (catalog$source_n == 0L) {
+              return(list(bg = tibble(), seed = tibble()))
             }
 
-            sim_gr <- GRanges(
-              seqnames = sim_dt$chr,
-              ranges = IRanges(start = sim_dt$start, end = sim_dt$end),
-              strand = "*"
-            )
+            local_bg_tbls <- vector("list", n_iter_bg)
+            local_seed_tbls <- vector("list", n_iter_bg)
 
-            seed_map_tbls[[length(seed_map_tbls) + 1L]] <- tibble(
-              filter_set = filter_set_name,
-              filter_set_clean = filter_clean,
-              window = "all_windows",
-              seed_used = as.integer(seed_used),
-              n_iter = n_iter_bg,
-              seed_base = as.integer(cfg$repeat_bg_seed),
-              seed_strategy = "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop",
-              repeat_bg_method = bg_method,
-              target_fraction = as.numeric(target_fraction_set),
-              simulated_elements = as.integer(nrow(sim_dt)),
-              simulated_bp = as.numeric(sum(sim_dt$rep_len_bp, na.rm = TRUE))
-            )
+            for (iter_idx in seq_len(n_iter_bg)) {
+              message(
+                "[Background][", filter_set_name, "] iteration ",
+                iter_idx, "/", n_iter_bg
+              )
 
-            for (window_label in names(window_width_col_map)) {
-              window_gr <- gene_window_list[[window_label]]
-              bg_decile <- tibble(
-                gene_id_clean = mcols(window_gr)$gene_id_clean,
-                bg_count = as.integer(countOverlaps(window_gr, sim_gr, ignore.strand = TRUE))
-              ) %>%
-                left_join(gene_decile_map, by = "gene_id_clean") %>%
-                filter(!is.na(post_mean_bin)) %>%
-                group_by(post_mean_bin) %>%
-                summarise(
-                  bg_mean = mean(bg_count, na.rm = TRUE),
-                  bg_median = median(bg_count, na.rm = TRUE),
-                  bg_prop_nonzero = mean(bg_count > 0, na.rm = TRUE),
-                  .groups = "drop"
+              sim_idx_local <- (row_idx - 1L) * n_iter_bg + iter_idx
+              seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx_local
+
+              sim_dt <- simulate_repeat_genome_dt(
+                catalog = catalog,
+                chrom_sizes_dt = chrom_sizes_dt,
+                repeat_fraction = target_fraction_set,
+                seed = as.integer(seed_used)
+              )
+              if (nrow(sim_dt) == 0L) {
+                next
+              }
+
+              sim_gr <- GRanges(
+                seqnames = sim_dt$chr,
+                ranges = IRanges(start = sim_dt$start, end = sim_dt$end),
+                strand = "*"
+              )
+
+              local_seed_tbls[[iter_idx]] <- tibble(
+                filter_set = filter_set_name,
+                filter_set_clean = filter_clean,
+                window = "all_windows",
+                seed_used = as.integer(seed_used),
+                n_iter = n_iter_bg,
+                seed_base = as.integer(cfg$repeat_bg_seed),
+                seed_strategy = "seed_used = repeat_bg_seed_base + (filter_row_index - 1) * repeat_bg_n_iter + iteration_index",
+                repeat_bg_method = bg_method,
+                target_fraction = as.numeric(target_fraction_set),
+                simulated_elements = as.integer(nrow(sim_dt)),
+                simulated_bp = as.numeric(sum(sim_dt$rep_len_bp, na.rm = TRUE))
+              )
+
+              local_window_tbls <- vector("list", length(window_width_col_map))
+              for (window_idx in seq_along(window_width_col_map)) {
+                window_label <- names(window_width_col_map)[[window_idx]]
+                window_gr <- gene_window_list[[window_label]]
+                bg_counts <- countOverlaps(window_gr, sim_gr, ignore.strand = TRUE)
+                local_window_tbls[[window_idx]] <- summarize_overlap_counts_by_bin(
+                  count_vec = bg_counts,
+                  bin_vec = window_decile_vecs[[window_label]]
                 ) %>%
-                mutate(
-                  filter_set = filter_set_name,
-                  filter_set_clean = filter_clean,
-                  window = window_label,
-                  seed_used = as.integer(seed_used),
-                  iter = as.integer(iter_idx)
-                )
+                  mutate(
+                    filter_set = filter_set_name,
+                    filter_set_clean = filter_clean,
+                    window = window_label,
+                    seed_used = as.integer(seed_used),
+                    iter = as.integer(iter_idx)
+                  )
+              }
 
-              bg_iter_tbls[[length(bg_iter_tbls) + 1L]] <- bg_decile
+              local_bg_tbls[[iter_idx]] <- bind_rows(local_window_tbls)
             }
-          }
-        }
+
+            list(
+              bg = bind_rows(local_bg_tbls),
+              seed = bind_rows(local_seed_tbls)
+            )
+          },
+          mc.cores = bg_n_cores,
+          mc.preschedule = FALSE,
+          mc.set.seed = FALSE
+        )
+
+        bg_iter_tbls <- explicit_results %>%
+          map("bg")
+        seed_map_tbls <- explicit_results %>%
+          map("seed")
       } else {
-        for (row_idx in seq_len(nrow(repeat_filter_map))) {
-          filter_set_name <- repeat_filter_map$filter_set[[row_idx]]
-          filter_clean <- repeat_filter_map$filter_set_clean[[row_idx]]
+        poisson_tasks <- tidyr::expand_grid(
+          row_idx = seq_len(nrow(repeat_filter_map)),
+          window_label = names(window_width_col_map)
+        ) %>%
+          mutate(task_idx = row_number())
 
-          chr_stats <- repeat_profile_chr_stats %>%
-            filter(filter_set == filter_set_name) %>%
-            select(chr, n_elements, mean_len_bp)
+        poisson_results <- parallel::mclapply(
+          seq_len(nrow(poisson_tasks)),
+          function(task_row_idx) {
+            row_idx <- poisson_tasks$row_idx[[task_row_idx]]
+            window_label <- poisson_tasks$window_label[[task_row_idx]]
+            task_idx <- poisson_tasks$task_idx[[task_row_idx]]
+            filter_set_name <- repeat_filter_map$filter_set[[row_idx]]
+            filter_clean <- repeat_filter_map$filter_set_clean[[row_idx]]
 
-          for (window_label in names(window_width_col_map)) {
+            chr_stats <- repeat_profile_chr_stats %>%
+              filter(filter_set == filter_set_name) %>%
+              select(chr, n_elements, mean_len_bp)
+
             obs_col <- paste0("repeat_filt_", filter_clean, "_count_", window_label)
             width_col <- window_width_col_map[[window_label]]
 
             if (!obs_col %in% names(analysis_dt) || !width_col %in% names(analysis_dt)) {
-              next
+              return(list(bg = tibble(), seed = tibble()))
             }
 
             sim_input <- analysis_dt %>%
@@ -385,23 +440,7 @@ run_repeat_background_analysis <- function(
               ) %>%
               filter(!is.na(post_mean_bin))
 
-            sim_idx <- sim_idx + 1L
-            seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx
-
-            seed_map_tbls[[length(seed_map_tbls) + 1L]] <- tibble(
-              filter_set = filter_set_name,
-              filter_set_clean = filter_clean,
-              window = window_label,
-              seed_used = as.integer(seed_used),
-              n_iter = n_iter_bg,
-              seed_base = as.integer(cfg$repeat_bg_seed),
-              seed_strategy = "seed_used = repeat_bg_seed_base + simulation_index_in_filter_window_loop",
-              repeat_bg_method = bg_method,
-              target_fraction = NA_real_,
-              simulated_elements = NA_integer_,
-              simulated_bp = NA_real_
-            )
-
+            seed_used <- as.integer(cfg$repeat_bg_seed) + as.integer(task_idx)
             bg_iter <- simulate_poisson_background(
               sim_input = sim_input,
               n_iter = n_iter_bg,
@@ -414,9 +453,31 @@ run_repeat_background_analysis <- function(
                 seed_used = as.integer(seed_used)
               )
 
-            bg_iter_tbls[[length(bg_iter_tbls) + 1L]] <- bg_iter
-          }
-        }
+            seed_tbl <- tibble(
+              filter_set = filter_set_name,
+              filter_set_clean = filter_clean,
+              window = window_label,
+              seed_used = as.integer(seed_used),
+              n_iter = n_iter_bg,
+              seed_base = as.integer(cfg$repeat_bg_seed),
+              seed_strategy = "seed_used = repeat_bg_seed_base + (task_index - 1)",
+              repeat_bg_method = bg_method,
+              target_fraction = NA_real_,
+              simulated_elements = NA_integer_,
+              simulated_bp = NA_real_
+            )
+
+            list(bg = bg_iter, seed = seed_tbl)
+          },
+          mc.cores = bg_n_cores,
+          mc.preschedule = FALSE,
+          mc.set.seed = FALSE
+        )
+
+        bg_iter_tbls <- poisson_results %>%
+          map("bg")
+        seed_map_tbls <- poisson_results %>%
+          map("seed")
       }
 
       if (length(seed_map_tbls) > 0L) {
