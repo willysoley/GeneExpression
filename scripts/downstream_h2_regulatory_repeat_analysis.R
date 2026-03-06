@@ -58,7 +58,7 @@ cfg <- list(
   repeat_bg_type_col = "repClass_norm", # column used for repeat composition in simulation
   repeat_bg_composition_basis = "bp",   # options: "bp", "count"
   repeat_bg_n_iter = 200L,
-  repeat_bg_n_cores = 8L,
+  repeat_bg_n_cores = 6L,
   repeat_bg_seed = 20260305L,
   repeat_bg_use_cache = TRUE,
   sine_subset_top_n = 40L

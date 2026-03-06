@@ -281,10 +281,26 @@ run_repeat_background_analysis <- function(
       n_iter_bg <- as.integer(cfg$repeat_bg_n_iter)
 
       if (identical(bg_method, "explicit_genome")) {
-        explicit_task_idx <- seq_len(nrow(repeat_filter_map))
-        explicit_results <- parallel::mclapply(
-          explicit_task_idx,
-          function(row_idx) {
+        progress_dir <- file.path(output_dir, "tmp_repeat_bg_progress")
+        dir.create(progress_dir, recursive = TRUE, showWarnings = FALSE)
+
+        explicit_task_tbl <- repeat_filter_map %>%
+          mutate(
+            row_idx = row_number(),
+            task_id = row_idx,
+            task_label = filter_set,
+            progress_path = file.path(
+              progress_dir,
+              paste0("explicit_", filter_set_clean, ".progress")
+            ),
+            total_iter = n_iter_bg
+          )
+
+        explicit_results <- run_mcparallel_tasks_with_progress(
+          task_tbl = explicit_task_tbl,
+          worker_fun = function(task_row) {
+            row_idx <- as.integer(task_row$row_idx[[1]])
+            progress_path <- as.character(task_row$progress_path[[1]])
             filter_set_name <- repeat_filter_map$filter_set[[row_idx]]
             filter_clean <- repeat_filter_map$filter_set_clean[[row_idx]]
             source_tbl <- repeat_profile_tbls[[filter_set_name]] %>%
@@ -316,11 +332,7 @@ run_repeat_background_analysis <- function(
             local_seed_tbls <- vector("list", n_iter_bg)
 
             for (iter_idx in seq_len(n_iter_bg)) {
-              message(
-                "[Background][", filter_set_name, "] iteration ",
-                iter_idx, "/", n_iter_bg
-              )
-
+              write_progress_counter(progress_path, iter_idx)
               sim_idx_local <- (row_idx - 1L) * n_iter_bg + iter_idx
               seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx_local
 
@@ -380,9 +392,7 @@ run_repeat_background_analysis <- function(
               seed = bind_rows(local_seed_tbls)
             )
           },
-          mc.cores = bg_n_cores,
-          mc.preschedule = FALSE,
-          mc.set.seed = FALSE
+          n_cores = bg_n_cores
         )
 
         bg_iter_tbls <- explicit_results %>%

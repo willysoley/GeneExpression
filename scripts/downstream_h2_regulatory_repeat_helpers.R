@@ -970,6 +970,143 @@ summarize_overlap_counts_by_bin <- function(count_vec, bin_vec) {
     arrange(post_mean_bin)
 }
 
+write_progress_counter <- function(path, value) {
+  writeLines(
+    text = as.character(as.integer(value)),
+    con = path,
+    useBytes = TRUE
+  )
+}
+
+read_progress_counter <- function(path) {
+  if (!file.exists(path)) {
+    return(NA_integer_)
+  }
+
+  value_txt <- tryCatch(
+    readLines(path, warn = FALSE, n = 1L),
+    error = function(e) NA_character_
+  )
+  value_int <- suppressWarnings(as.integer(value_txt[[1]]))
+
+  if (!is.finite(value_int)) {
+    return(NA_integer_)
+  }
+
+  as.integer(value_int)
+}
+
+emit_background_progress <- function(label, current_iter, total_iter) {
+  cat(
+    sprintf(
+      "[Background][%s] iteration %d/%d\n",
+      as.character(label),
+      as.integer(current_iter),
+      as.integer(total_iter)
+    )
+  )
+  flush.console()
+}
+
+run_mcparallel_tasks_with_progress <- function(task_tbl, worker_fun, n_cores, poll_sec = 0.1) {
+  if (nrow(task_tbl) == 0L) {
+    return(list())
+  }
+
+  required_cols <- c("task_id", "task_label", "progress_path", "total_iter")
+  if (!all(required_cols %in% names(task_tbl))) {
+    stop(
+      "task_tbl must contain columns: ",
+      paste(required_cols, collapse = ", ")
+    )
+  }
+
+  progress_paths <- task_tbl$progress_path %>%
+    as.character()
+  if (length(progress_paths) > 0L) {
+    file.remove(progress_paths[file.exists(progress_paths)])
+  }
+
+  result_list <- vector("list", nrow(task_tbl))
+  pending_idx <- seq_len(nrow(task_tbl))
+  running_jobs <- list()
+  last_seen <- integer(nrow(task_tbl))
+
+  poll_progress <- function() {
+    for (row_idx in seq_len(nrow(task_tbl))) {
+      current_iter <- read_progress_counter(task_tbl$progress_path[[row_idx]])
+      total_iter <- as.integer(task_tbl$total_iter[[row_idx]])
+
+      if (!is.finite(current_iter) || current_iter <= last_seen[[row_idx]]) {
+        next
+      }
+
+      current_iter <- min(current_iter, total_iter)
+      for (iter_idx in seq.int(last_seen[[row_idx]] + 1L, current_iter)) {
+        emit_background_progress(
+          label = task_tbl$task_label[[row_idx]],
+          current_iter = iter_idx,
+          total_iter = total_iter
+        )
+      }
+      last_seen[[row_idx]] <<- current_iter
+    }
+  }
+
+  while (length(pending_idx) > 0L || length(running_jobs) > 0L) {
+    while (length(running_jobs) < n_cores && length(pending_idx) > 0L) {
+      row_idx <- pending_idx[[1]]
+      pending_idx <- pending_idx[-1]
+      task_row <- task_tbl[row_idx, , drop = FALSE]
+
+      job <- parallel::mcparallel(
+        expr = worker_fun(task_row),
+        silent = TRUE
+      )
+      running_jobs[[as.character(job$pid)]] <- list(
+        job = job,
+        row_idx = row_idx
+      )
+    }
+
+    poll_progress()
+
+    if (length(running_jobs) == 0L) {
+      next
+    }
+
+    collected <- parallel::mccollect(
+      jobs = lapply(running_jobs, `[[`, "job"),
+      wait = FALSE
+    )
+
+    if (length(collected) == 0L) {
+      Sys.sleep(poll_sec)
+      next
+    }
+
+    for (pid in names(collected)) {
+      row_idx <- running_jobs[[pid]]$row_idx
+      job_result <- collected[[pid]]
+
+      if (inherits(job_result, "try-error")) {
+        stop(job_result)
+      }
+
+      result_list[[row_idx]] <- job_result
+      running_jobs[[pid]] <- NULL
+    }
+  }
+
+  poll_progress()
+
+  if (length(progress_paths) > 0L) {
+    file.remove(progress_paths[file.exists(progress_paths)])
+  }
+
+  result_list
+}
+
 simulate_poisson_background <- function(sim_input, n_iter, seed) {
   if (nrow(sim_input) == 0L || n_iter <= 0L) {
     return(tibble(
