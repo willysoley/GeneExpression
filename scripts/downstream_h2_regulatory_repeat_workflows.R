@@ -105,17 +105,37 @@ run_repeat_background_analysis <- function(
 
     bg_iter_cache_path <- file.path(output_dir, "repeat_filtered_background_iter.tsv")
     bg_seed_cache_path <- file.path(output_dir, "repeat_background_seed_map.tsv")
-    use_bg_cache <- isTRUE(cfg$repeat_bg_use_cache) && file.exists(bg_iter_cache_path)
+    use_bg_cache <- FALSE
+
+    if (
+      isTRUE(cfg$repeat_bg_use_cache) &&
+        file.exists(bg_iter_cache_path) &&
+        file.exists(bg_seed_cache_path)
+    ) {
+      repeat_bg_seed_map_candidate <- fread(bg_seed_cache_path) %>%
+        as_tibble()
+
+      cache_iter_ok <- "n_iter" %in% names(repeat_bg_seed_map_candidate) &&
+        nrow(repeat_bg_seed_map_candidate) > 0L &&
+        any(!is.na(repeat_bg_seed_map_candidate$n_iter)) &&
+        all(as.integer(repeat_bg_seed_map_candidate$n_iter) == as.integer(cfg$repeat_bg_n_iter), na.rm = TRUE)
+
+      cache_method_ok <- !("repeat_bg_method" %in% names(repeat_bg_seed_map_candidate)) ||
+        all(as.character(repeat_bg_seed_map_candidate$repeat_bg_method) == as.character(cfg$repeat_bg_method), na.rm = TRUE)
+
+      use_bg_cache <- isTRUE(cache_iter_ok) && isTRUE(cache_method_ok)
+
+      if (use_bg_cache) {
+        repeat_bg_seed_map <- repeat_bg_seed_map_candidate
+      } else {
+        message("Cached background simulation data found, but settings do not match current cfg; re-running simulation.")
+      }
+    }
 
     if (use_bg_cache) {
       message("Using cached background simulation data: ", bg_iter_cache_path)
       repeat_background_iter <- fread(bg_iter_cache_path) %>%
         as_tibble()
-
-      if (file.exists(bg_seed_cache_path)) {
-        repeat_bg_seed_map <- fread(bg_seed_cache_path) %>%
-          as_tibble()
-      }
     } else if (isTRUE(as.integer(cfg$repeat_bg_n_iter) > 0L)) {
       bg_method <- as.character(cfg$repeat_bg_method)
       if (!bg_method %in% c("explicit_genome", "poisson_window")) {
@@ -260,13 +280,10 @@ run_repeat_background_analysis <- function(
           }
 
           for (iter_idx in seq_len(n_iter_bg)) {
-            if (iter_idx %% 100L == 0L || iter_idx == n_iter_bg) {
-              message(
-                "[Background][", filter_set_name, "] iteration ",
-                iter_idx, "/", n_iter_bg
-              )
-            }
-
+            message(
+              "[Background][", filter_set_name, "] iteration ",
+              iter_idx, "/", n_iter_bg
+            )
             sim_idx <- sim_idx + 1L
             seed_used <- as.integer(cfg$repeat_bg_seed) + sim_idx
 
