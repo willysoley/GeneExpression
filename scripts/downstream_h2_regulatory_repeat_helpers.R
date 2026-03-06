@@ -987,6 +987,11 @@ read_progress_counter <- function(path) {
     readLines(path, warn = FALSE, n = 1L),
     error = function(e) NA_character_
   )
+
+  if (length(value_txt) == 0L || all(is.na(value_txt))) {
+    return(NA_integer_)
+  }
+
   value_int <- suppressWarnings(as.integer(value_txt[[1]]))
 
   if (!is.finite(value_int)) {
