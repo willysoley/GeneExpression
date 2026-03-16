@@ -1451,29 +1451,66 @@ generate_summary_plots <- function(
     height = 5
   )
 
-  p_h2_box <- analysis_dt %>%
-    as_tibble() %>%
-    filter(is.finite(h2_GREML), !is.na(post_mean_bin)) %>%
-    ggplot(aes(x = factor(post_mean_bin), y = h2_GREML)) +
-    geom_boxplot(
-      fill = "#8ecae6",
-      color = "#1d3557",
-      outlier.alpha = 0.35,
-      outlier.size = 0.8
-    ) +
-    labs(
-      title = "h2_GREML Distribution by s_het post_mean Decile",
-      x = "s_het post_mean decile",
-      y = "h2_GREML"
-    ) +
-    theme_minimal(base_size = 12)
+  h2_box_tbl <- analysis_tbl %>%
+    filter(is.finite(h2_GREML), !is.na(post_mean_bin))
+
+  plot_h2_box_by_decile <- function(plot_tbl, title_text, subtitle_text) {
+    plot_tbl %>%
+      ggplot(aes(x = factor(post_mean_bin), y = h2_GREML)) +
+      geom_boxplot(
+        fill = "#8ecae6",
+        color = "#1d3557",
+        outlier.alpha = 0.35,
+        outlier.size = 0.8
+      ) +
+      labs(
+        title = title_text,
+        subtitle = subtitle_text,
+        x = "s_het post_mean decile",
+        y = "h2_GREML"
+      ) +
+      theme_minimal(base_size = 12)
+  }
+
+  p_h2_box_all <- plot_h2_box_by_decile(
+    plot_tbl = h2_box_tbl,
+    title_text = "h2_GREML Distribution by s_het post_mean Decile",
+    subtitle_text = "All genes retained after expression and s_het filtering"
+  )
 
   ggsave(
     filename = file.path(output_dir, "plots", "regulatory_burden_vs_h2.pdf"),
-    plot = p_h2_box,
+    plot = p_h2_box_all,
     width = 9,
     height = 5.5
   )
+
+  ggsave(
+    filename = file.path(output_dir, "plots", "h2_distribution_by_shet_decile_all_genes.pdf"),
+    plot = p_h2_box_all,
+    width = 9,
+    height = 5.5
+  )
+
+  h2_box_sig_tbl <- h2_box_tbl %>%
+    filter(is.finite(Pval_GREML), Pval_GREML < 0.05)
+
+  if (nrow(h2_box_sig_tbl) > 0L) {
+    p_h2_box_sig <- plot_h2_box_by_decile(
+      plot_tbl = h2_box_sig_tbl,
+      title_text = "h2_GREML Distribution by s_het post_mean Decile",
+      subtitle_text = "Genes with GREML P-value < 0.05"
+    )
+
+    ggsave(
+      filename = file.path(output_dir, "plots", "h2_distribution_by_shet_decile_pval_lt_0.05.pdf"),
+      plot = p_h2_box_sig,
+      width = 9,
+      height = 5.5
+    )
+  } else {
+    message("Skipping Pval_GREML < 0.05 h2 box plot: no significant genes available.")
+  }
 
   repeat_class_cols <- names(analysis_dt) %>%
     str_subset("^repeat_class_.*_count_100kb$")
