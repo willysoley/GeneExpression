@@ -19,12 +19,9 @@ Set these in `cfg`:
 Optional:
 - `sample_id_map_tsv`: 2-column mapping (`sample_id`, `participant_id`) if phenotype columns need renaming to genotype IDs.
 
-## Filtering modes
-- `gtex_tpm_only`:
-  - keep genes with `TPM >= 0.1` in `>= 20%` samples
-- `gtex_tpm_and_counts`:
-  - keep genes with `TPM >= 0.1` in `>= 20%` samples
-  - and raw counts `>= 6` in `>= 20%` samples
+## Filtering rule (mandatory)
+- keep genes with `TPM >= 0.1` in `>= 20%` samples
+- and raw counts `>= 6` in `>= 20%` samples
 
 ## Run
 From repository root:

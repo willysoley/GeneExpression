@@ -23,7 +23,6 @@ cfg <- list(
   output_dir = "results/gtex_like_expression_phenotype",
   sdrf_url = "https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt",
   eur_pops = c("British", "Finnish", "Tuscan", "Utah"),
-  expression_filter_mode = "gtex_tpm_only", # options: gtex_tpm_only, gtex_tpm_and_counts
   gtex_tpm_threshold = 0.1,
   gtex_count_threshold = 6L,
   gtex_sample_frac_threshold = 0.2,
@@ -264,14 +263,8 @@ counts_mat[counts_mat < 0] <- 0
 
 tpm_keep <- rowSums(tpm_mat >= cfg$gtex_tpm_threshold, na.rm = TRUE) >= min_samples
 
-if (identical(cfg$expression_filter_mode, "gtex_tpm_and_counts")) {
-  count_keep <- rowSums(counts_mat >= cfg$gtex_count_threshold, na.rm = TRUE) >= min_samples
-  keep_mask <- tpm_keep & count_keep
-} else if (identical(cfg$expression_filter_mode, "gtex_tpm_only")) {
-  keep_mask <- tpm_keep
-} else {
-  stop("Unknown cfg$expression_filter_mode: ", cfg$expression_filter_mode)
-}
+count_keep <- rowSums(counts_mat >= cfg$gtex_count_threshold, na.rm = TRUE) >= min_samples
+keep_mask <- tpm_keep & count_keep
 
 filtered_genes <- tpm_tbl$gene_id_clean[keep_mask]
 sanity_check(
@@ -377,7 +370,7 @@ run_summary <- tibble(
     cfg$gtex_count_threshold,
     cfg$gtex_sample_frac_threshold,
     min_samples,
-    cfg$expression_filter_mode
+    "gtex_tpm_and_counts_mandatory"
   )
 )
 

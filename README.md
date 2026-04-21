@@ -16,20 +16,30 @@ For upstream phenotype preparation (before heritability/eQTL mapping), use:
 - `scripts/prepare_gtex_like_expression_phenotype.R`
 
 This script prepares GTEx-style expression phenotypes:
-- TPM-based gene filtering (and optional count threshold filter)
+- mandatory TPM+count filtering (`TPM >= 0.1` and `counts >= 6` in `>=20%` samples)
 - TMM normalization of counts
 - inverse-normal transformation per gene across samples
+
+For end-to-end GREML execution through Nextflow + Slurm:
+- `nf/main.nf`
+- `nf/nextflow.config`
+- `nf/bin/prepare_phenotypes.R`
+- `run_greml.sh` (submit with `sbatch run_greml.sh`)
 
 ## Repository Objects
 ### Core code
 - `scripts/downstream_h2_regulatory_repeat_analysis.R`
 - `scripts/downstream_h2_regulatory_repeat_helpers.R`
 - `scripts/prepare_gtex_like_expression_phenotype.R`
+- `nf/main.nf`
+- `nf/bin/prepare_phenotypes.R`
+- `run_greml.sh`
 
 ### Documentation
 - `docs/how_to_run_downstream_analysis.md`
 - `docs/downstream_analysis_methods.md`
 - `docs/how_to_prepare_gtex_like_phenotypes.md`
+- `docs/how_to_run_greml_nextflow.md`
 
 ## Inputs
 ### Required user inputs (set in `cfg`)
