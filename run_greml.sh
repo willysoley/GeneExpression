@@ -4,8 +4,8 @@
 #SBATCH -c 1
 #SBATCH --mem=8G
 #SBATCH -t 7-00:00:00
-#SBATCH -o slurm-%x-%j.out
-#SBATCH -e slurm-%x-%j.err
+#SBATCH -o nextflow_logs/nextflow_driver.out
+#SBATCH -e nextflow_logs/nextflow_driver.err
 
 set -euo pipefail
 
@@ -46,6 +46,9 @@ fi
 # Keep this stable across reruns to preserve Nextflow resume/cache behavior.
 export NXF_WORK="${NXF_WORK:-/gpfs/scratch/sl8085/nextflow_work/greml_production}"
 mkdir -p "${RUN_DIR}/nextflow_logs" "${RUN_DIR}/results" "${NXF_WORK}"
+DRIVER_OUT="${RUN_DIR}/nextflow_logs/nextflow_driver.out"
+DRIVER_ERR="${RUN_DIR}/nextflow_logs/nextflow_driver.err"
+exec > >(tee -a "${DRIVER_OUT}") 2> >(tee -a "${DRIVER_ERR}" >&2)
 
 module load nextflow
 

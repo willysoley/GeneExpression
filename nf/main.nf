@@ -8,7 +8,7 @@ def mustExist = { label, p ->
     if (!f.exists()) {
         error "Not found: ${label}=${p} (launchDir=${launchDir}, projectDir=${projectDir})"
     }
-    f.toString()
+    f.toAbsolutePath().normalize().toString()
 }
 
 process FILTER_EUROPEANS {
@@ -37,17 +37,35 @@ process FILTER_EUROPEANS {
 
     pop_col <- grep("ancestry category", names(sdrf), ignore.case=TRUE, value=TRUE)[1]
     rna_col <- grep("ENA_RUN", names(sdrf), value=TRUE)[1]
-    sample_col <- "Source Name"
 
-    if (is.na(pop_col) || is.na(rna_col) || !sample_col %in% names(sdrf)) {
-      stop("Could not detect required SDRF columns.")
+    if (is.na(pop_col) || is.na(rna_col)) {
+      stop("Could not detect required SDRF columns: ancestry category and/or ENA_RUN.")
     }
 
     targets <- unlist(strsplit("${eur_pop_arg}", ",", fixed=TRUE))
     sdrf_eur <- sdrf[get(pop_col) %in% targets]
 
+    fam[, V2 := as.character(V2)]
+    candidate_sample_cols <- intersect(
+      c("Source Name", "Characteristics[individual]", "Factor Value[individual]"),
+      names(sdrf_eur)
+    )
+    if (length(candidate_sample_cols) == 0L) {
+      stop("No candidate sample-ID column found in SDRF.")
+    }
+
+    overlap_n <- vapply(
+      candidate_sample_cols,
+      function(col) sum(as.character(sdrf_eur[[col]]) %in% fam$V2, na.rm=TRUE),
+      numeric(1)
+    )
+    sample_col <- candidate_sample_cols[which.max(overlap_n)]
+    if (is.na(sample_col) || overlap_n[which.max(overlap_n)] == 0) {
+      stop("Could not map SDRF sample IDs to FAM IID (V2).")
+    }
+
     mapped <- merge(sdrf_eur, fam, by.x=sample_col, by.y="V2")
-    mapped <- mapped[!duplicated(V2)]
+    mapped <- unique(mapped, by=sample_col)
 
     write.table(mapped[, .(V1, get(sample_col))], "eur_keep.txt",
                 sep="\\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
@@ -186,7 +204,15 @@ workflow {
 
     params.tpm_file = mustExist("tpm_file", params.tpm_file)
     params.counts_file = mustExist("counts_file", params.counts_file)
-    params.prepare_pheno_script = mustExist("prepare_pheno_script", params.prepare_pheno_script)
+    def prepDefaults = [
+        "${projectDir}/bin/prepare_phenotypes.R",
+        "${projectDir}/nf/bin/prepare_phenotypes.R"
+    ]
+    def prepScript = params.prepare_pheno_script?.toString()
+    if (!prepScript || prepDefaults.contains(prepScript)) {
+        prepScript = prepDefaults.find { file(it).exists() } ?: prepScript
+    }
+    params.prepare_pheno_script = mustExist("prepare_pheno_script", prepScript)
     def bed_path = mustExist("plink bed", "${params.plink_prefix}.bed")
     def bim_path = mustExist("plink bim", "${params.plink_prefix}.bim")
     def fam_path = mustExist("plink fam", "${params.plink_prefix}.fam")
