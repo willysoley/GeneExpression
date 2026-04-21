@@ -12,14 +12,24 @@ The main script is:
 
 It builds a gene-level feature matrix and summary plots/tables for decile trends, association models, repeat subtype behavior, and random-genomic-background enrichment.
 
+For upstream phenotype preparation (before heritability/eQTL mapping), use:
+- `scripts/prepare_gtex_like_expression_phenotype.R`
+
+This script prepares GTEx-style expression phenotypes:
+- TPM-based gene filtering (and optional count threshold filter)
+- TMM normalization of counts
+- inverse-normal transformation per gene across samples
+
 ## Repository Objects
 ### Core code
 - `scripts/downstream_h2_regulatory_repeat_analysis.R`
 - `scripts/downstream_h2_regulatory_repeat_helpers.R`
+- `scripts/prepare_gtex_like_expression_phenotype.R`
 
 ### Documentation
 - `docs/how_to_run_downstream_analysis.md`
 - `docs/downstream_analysis_methods.md`
+- `docs/how_to_prepare_gtex_like_phenotypes.md`
 
 ## Inputs
 ### Required user inputs (set in `cfg`)
