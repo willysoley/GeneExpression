@@ -46,9 +46,6 @@ fi
 # Keep this stable across reruns to preserve Nextflow resume/cache behavior.
 export NXF_WORK="${NXF_WORK:-/gpfs/scratch/sl8085/nextflow_work/greml_production}"
 mkdir -p "${RUN_DIR}/nextflow_logs" "${RUN_DIR}/results" "${NXF_WORK}"
-DRIVER_OUT="${RUN_DIR}/nextflow_logs/nextflow_driver.out"
-DRIVER_ERR="${RUN_DIR}/nextflow_logs/nextflow_driver.err"
-exec > >(tee -a "${DRIVER_OUT}") 2> >(tee -a "${DRIVER_ERR}" >&2)
 
 module load nextflow
 

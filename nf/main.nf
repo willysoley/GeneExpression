@@ -56,7 +56,7 @@ process FILTER_EUROPEANS {
 
     overlap_n <- vapply(
       candidate_sample_cols,
-      function(col) sum(as.character(sdrf_eur[[col]]) %in% fam$V2, na.rm=TRUE),
+      function(col) sum(as.character(sdrf_eur[[col]]) %in% fam[["V2"]], na.rm=TRUE),
       numeric(1)
     )
     sample_col <- candidate_sample_cols[which.max(overlap_n)]
