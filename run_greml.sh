@@ -9,21 +9,26 @@
 
 set -euo pipefail
 
-BASE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-NF_DIR="${BASE}/nf"
+# Resolve project directory from script location, but write logs/results to the
+# directory where sbatch was submitted from.
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+RUN_DIR="${SLURM_SUBMIT_DIR:-$(pwd)}"
+RUN_DIR="$(cd "${RUN_DIR}" && pwd)"
+NF_DIR="${PROJECT_DIR}/nf"
 
 # Keep this stable across reruns to preserve Nextflow resume/cache behavior.
 export NXF_WORK="${NXF_WORK:-/gpfs/scratch/sl8085/nextflow_work/greml_production}"
-mkdir -p "${BASE}/nextflow_logs" "${BASE}/results" "${NXF_WORK}"
+mkdir -p "${RUN_DIR}/nextflow_logs" "${RUN_DIR}/results" "${NXF_WORK}"
 
 module load nextflow
 
-export NXF_LOG_FILE="${BASE}/nextflow_logs/nextflow.log"
+export NXF_LOG_FILE="${RUN_DIR}/nextflow_logs/nextflow.log"
 
-cd "${BASE}"
+cd "${RUN_DIR}"
 
 echo "Launching GREML workflow"
-echo "Project dir : ${BASE}"
+echo "Project dir : ${PROJECT_DIR}"
+echo "Run dir     : ${RUN_DIR}"
 echo "Work dir    : ${NXF_WORK}"
 echo "Config file : ${NF_DIR}/nextflow.config"
 

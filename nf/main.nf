@@ -92,7 +92,7 @@ process PREPARE_PHENOTYPES {
     """
     echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), TMM on counts, then INT"
 
-    Rscript ${projectDir}/nf/bin/prepare_phenotypes.R \
+    Rscript ${projectDir}/bin/prepare_phenotypes.R \
       ${tpm} \
       ${counts} \
       ${id_map} \
