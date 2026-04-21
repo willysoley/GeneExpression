@@ -40,6 +40,13 @@ Optional parameter overrides at submit-time:
 sbatch --export=ALL run_greml.sh --peer_nk 45 --outdir results_custom
 ```
 
+If you submit from outside the repository root:
+
+```bash
+sbatch --export=ALL,GREML_PROJECT_ROOT=/absolute/path/to/GeneExpression \
+  /absolute/path/to/GeneExpression/run_greml.sh
+```
+
 ## Outputs
 Under `results/`:
 - `data/final.phenotypes.tsv`

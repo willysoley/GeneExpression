@@ -1,5 +1,16 @@
 nextflow.enable.dsl = 2
 
+def mustExist = { label, p ->
+    if (!p) {
+        error "Missing required parameter: ${label}"
+    }
+    def f = file(p.toString())
+    if (!f.exists()) {
+        error "Not found: ${label}=${p} (launchDir=${launchDir}, projectDir=${projectDir})"
+    }
+    f.toString()
+}
+
 process FILTER_EUROPEANS {
     input:
     val sdrf_url
@@ -92,7 +103,7 @@ process PREPARE_PHENOTYPES {
     """
     echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), TMM on counts, then INT"
 
-    Rscript ${projectDir}/bin/prepare_phenotypes.R \
+    Rscript ${params.prepare_pheno_script} \
       ${tpm} \
       ${counts} \
       ${id_map} \
@@ -168,11 +179,23 @@ process SUMMARIZE_RESULTS {
 }
 
 workflow {
-    tpm_ch = Channel.fromPath(params.tpm_file)
-    counts_ch = Channel.fromPath(params.counts_file)
-    bed_ch = Channel.fromPath("${params.plink_prefix}.bed")
-    bim_ch = Channel.fromPath("${params.plink_prefix}.bim")
-    fam_ch = Channel.fromPath("${params.plink_prefix}.fam")
+    log.info "launchDir=${launchDir}"
+    log.info "projectDir=${projectDir}"
+    log.info "workDir=${workflow.workDir}"
+    log.info "outdir=${params.outdir}"
+
+    params.tpm_file = mustExist("tpm_file", params.tpm_file)
+    params.counts_file = mustExist("counts_file", params.counts_file)
+    params.prepare_pheno_script = mustExist("prepare_pheno_script", params.prepare_pheno_script)
+    def bed_path = mustExist("plink bed", "${params.plink_prefix}.bed")
+    def bim_path = mustExist("plink bim", "${params.plink_prefix}.bim")
+    def fam_path = mustExist("plink fam", "${params.plink_prefix}.fam")
+
+    tpm_ch = Channel.value(file(params.tpm_file))
+    counts_ch = Channel.value(file(params.counts_file))
+    bed_ch = Channel.value(file(bed_path))
+    bim_ch = Channel.value(file(bim_path))
+    fam_ch = Channel.value(file(fam_path))
 
     FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
 
