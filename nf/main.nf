@@ -1,3 +1,6 @@
+import java.security.MessageDigest
+import java.time.Instant
+
 nextflow.enable.dsl = 2
 
 def mustExist = { label, p ->
@@ -9,6 +12,43 @@ def mustExist = { label, p ->
         error "Not found: ${label}=${p} (launchDir=${launchDir}, projectDir=${projectDir})"
     }
     f.toAbsolutePath().normalize().toString()
+}
+
+def requiredPrepareDiagnostics = [
+    "Applying mandatory GTEx-style filter",
+    "Running TMM normalization on raw counts",
+    "Phenotype prep completed successfully"
+]
+
+def sha256Hex = { pathStr ->
+    def md = MessageDigest.getInstance("SHA-256")
+    new File(pathStr.toString()).withInputStream { is ->
+        byte[] buffer = new byte[8192]
+        for (int read = is.read(buffer); read != -1; read = is.read(buffer)) {
+            md.update(buffer, 0, read)
+        }
+    }
+    md.digest().collect { String.format("%02x", it) }.join()
+}
+
+def validatePreparePhenoScript = { label, scriptPath, requiredMarkers ->
+    def resolvedPath = mustExist(label, scriptPath)
+    def scriptFile = new File(resolvedPath)
+    def scriptText = scriptFile.getText("UTF-8")
+    def missingMarkers = requiredMarkers.findAll { marker -> !scriptText.contains(marker) }
+    def mtimeUtc = Instant.ofEpochMilli(scriptFile.lastModified()).toString()
+    def sha256 = sha256Hex(resolvedPath)
+
+    log.info "${label}=${resolvedPath}"
+    log.info "${label}_mtime_utc=${mtimeUtc}"
+    log.info "${label}_sha256=${sha256}"
+
+    if (missingMarkers) {
+        error "${label} missing required diagnostic marker(s): ${missingMarkers.join(' | ')}"
+    }
+    log.info "${label} diagnostics preflight OK (${requiredMarkers.size()} markers)"
+
+    [path: resolvedPath, sha256: sha256, mtimeUtc: mtimeUtc]
 }
 
 process FILTER_EUROPEANS {
@@ -118,7 +158,12 @@ process PREPARE_PHENOTYPES {
     path "filtered_gene_ids.txt", emit: filtered_genes
 
     script:
+    def runtimeDiagnostics = requiredPrepareDiagnostics
+        .collect { marker -> "\"${marker}\"" }
+        .join("\n      ")
     """
+    set -euo pipefail
+
     echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), TMM on counts, then INT"
 
     Rscript ${params.prepare_pheno_script} \
@@ -132,7 +177,19 @@ process PREPARE_PHENOTYPES {
       ${params.gtex_tpm_threshold} \
       ${params.gtex_count_threshold} \
       ${params.gtex_sample_frac_threshold} \
-      ${params.n_pcs}
+      ${params.n_pcs} \
+      2>&1 | tee prepare_phenotypes.log
+
+    required_diagnostics=(
+      ${runtimeDiagnostics}
+    )
+    for marker in "\${required_diagnostics[@]}"; do
+      if ! grep -Fq "\${marker}" prepare_phenotypes.log; then
+        echo "ERROR: Missing required prepare_phenotypes diagnostic line: \${marker}" >&2
+        echo "Checked script: ${params.prepare_pheno_script}" >&2
+        exit 1
+      fi
+    done
     """
 }
 
@@ -204,15 +261,40 @@ workflow {
 
     params.tpm_file = mustExist("tpm_file", params.tpm_file)
     params.counts_file = mustExist("counts_file", params.counts_file)
-    def prepDefaults = [
+
+    def canonicalPrepCandidates = [
+        "${projectDir}/nf/bin/prepare_phenotypes.R",
         "${projectDir}/bin/prepare_phenotypes.R",
-        "${projectDir}/nf/bin/prepare_phenotypes.R"
-    ]
+        "${launchDir}/nf/bin/prepare_phenotypes.R"
+    ].unique()
+    def canonicalPrepScript = canonicalPrepCandidates.find { file(it).exists() }
+    if (!canonicalPrepScript) {
+        error "Could not locate canonical nf/bin/prepare_phenotypes.R. Checked: ${canonicalPrepCandidates.join(', ')}"
+    }
+    def canonicalPrepMeta = validatePreparePhenoScript(
+        "canonical_prepare_pheno_script",
+        canonicalPrepScript,
+        requiredPrepareDiagnostics
+    )
+
+    def prepDefaults = [
+        "${projectDir}/nf/bin/prepare_phenotypes.R",
+        "${projectDir}/bin/prepare_phenotypes.R",
+        "${launchDir}/nf/bin/prepare_phenotypes.R"
+    ].unique()
     def prepScript = params.prepare_pheno_script?.toString()
     if (!prepScript || prepDefaults.contains(prepScript)) {
         prepScript = prepDefaults.find { file(it).exists() } ?: prepScript
     }
-    params.prepare_pheno_script = mustExist("prepare_pheno_script", prepScript)
+    def selectedPrepMeta = validatePreparePhenoScript(
+        "prepare_pheno_script",
+        prepScript,
+        requiredPrepareDiagnostics
+    )
+    params.prepare_pheno_script = selectedPrepMeta.path
+    if (selectedPrepMeta.sha256 != canonicalPrepMeta.sha256) {
+        error "prepare_pheno_script SHA-256 (${selectedPrepMeta.sha256}) differs from canonical nf/bin copy (${canonicalPrepMeta.sha256}). Refusing to run stale or unexpected script."
+    }
     def bed_path = mustExist("plink bed", "${params.plink_prefix}.bed")
     def bim_path = mustExist("plink bim", "${params.plink_prefix}.bim")
     def fam_path = mustExist("plink fam", "${params.plink_prefix}.fam")
@@ -242,8 +324,8 @@ workflow {
 
     ESTIMATE_HERITABILITY(
         gene_ch,
-        PREPARE_PHENOTYPES.out.pheno.collect(),
-        PREPARE_PHENOTYPES.out.qcovar.collect(),
+        PREPARE_PHENOTYPES.out.pheno.first(),
+        PREPARE_PHENOTYPES.out.qcovar.first(),
         GENERATE_PCA.out.grm.collect()
     )
 

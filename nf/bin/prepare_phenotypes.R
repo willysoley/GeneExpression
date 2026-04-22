@@ -6,6 +6,8 @@ suppressPackageStartupMessages({
   library(peer)
 })
 
+SCRIPT_VERSION <- "prepare_phenotypes.R 2026-04-22c"
+
 args <- commandArgs(trailingOnly = TRUE)
 if (length(args) < 11) {
   stop(
@@ -44,15 +46,86 @@ detect_gene_col <- function(dt) {
   gene_col
 }
 
+require_cols <- function(dt, required, label) {
+  missing <- setdiff(required, names(dt))
+  if (length(missing) > 0L) {
+    stop(
+      label,
+      " is missing required columns: ",
+      paste(missing, collapse = ", ")
+    )
+  }
+}
+
 dedup_cols_by_run <- function(cols) {
-  map_dt <- data.table(raw_col = cols)
-  map_dt[, run_id := sub("_[0-9]+$", "", raw_col)]
+  map_dt <- data.table(raw_col = as.character(cols))
+  map_dt[, raw_col_base := sub("\\.[0-9]+$", "", raw_col)]
+  map_dt[, run_id := sub("_[0-9]+$", "", raw_col_base)]
   map_dt <- map_dt[!duplicated(run_id)]
+  map_dt[, raw_col_base := NULL]
   map_dt
+}
+
+numeric_sample_dt <- function(dt, cols, label) {
+  if (length(cols) == 0L) {
+    stop("No sample columns selected for ", label, ".")
+  }
+
+  out <- vector("list", length(cols))
+  bad_total <- 0L
+  bad_cols <- character()
+  bad_examples <- character()
+
+  for (i in seq_along(cols)) {
+    col_name <- cols[[i]]
+    raw_vals <- dt[[col_name]]
+    chr_vals <- trimws(as.character(raw_vals))
+    num_vals <- suppressWarnings(as.numeric(chr_vals))
+    bad_mask <- is.na(num_vals) & !is.na(raw_vals) & nzchar(chr_vals)
+
+    if (any(bad_mask)) {
+      bad_total <- bad_total + sum(bad_mask)
+      bad_cols <- c(bad_cols, col_name)
+      bad_examples <- unique(c(bad_examples, unique(chr_vals[bad_mask])))
+      if (length(bad_examples) > 5L) {
+        bad_examples <- bad_examples[seq_len(5L)]
+      }
+    }
+
+    out[[i]] <- num_vals
+  }
+
+  out_dt <- as.data.table(out)
+  setnames(out_dt, cols)
+
+  if (bad_total > 0L) {
+    log_msg(sprintf(
+      "%s: coerced %d non-numeric values to NA across %d sample columns (examples: %s)",
+      label,
+      bad_total,
+      length(unique(bad_cols)),
+      paste(bad_examples, collapse = ", ")
+    ))
+  }
+
+  out_dt
 }
 
 collapse_gene_matrix <- function(mat, gene_ids, mode = c("mean", "sum")) {
   mode <- match.arg(mode)
+  mat <- as.matrix(mat)
+  if (is.null(dim(mat))) {
+    mat <- matrix(mat, ncol = 1L)
+  }
+  if (length(gene_ids) != nrow(mat)) {
+    stop(
+      "Gene ID length/matrix row mismatch in collapse_gene_matrix: ",
+      length(gene_ids),
+      " gene IDs for ",
+      nrow(mat),
+      " matrix rows."
+    )
+  }
   dt <- as.data.table(mat)
   dt[, gene_id_clean := gene_ids]
 
@@ -90,11 +163,18 @@ if (!file.exists(pca_file)) stop("Missing pca_file: ", pca_file)
 if (!file.exists(fam_file)) stop("Missing fam_file: ", fam_file)
 
 log_msg("Loading inputs")
+log_msg(sprintf("Script version: %s", SCRIPT_VERSION))
 eur_map <- fread(map_file) # RNA_ID, IID, FID
 pca <- fread(pca_file, header = FALSE)
 fam <- fread(fam_file, header = FALSE)
 tpm_dt <- fread(tpm_file)
 counts_dt <- fread(counts_file)
+require_cols(eur_map, c("RNA_ID", "IID", "FID"), "map_file")
+eur_map[, RNA_ID := as.character(RNA_ID)]
+eur_map[, IID := as.character(IID)]
+eur_map[, FID := as.character(FID)]
+names(tpm_dt) <- make.unique(names(tpm_dt))
+names(counts_dt) <- make.unique(names(counts_dt))
 
 tpm_gene_col <- detect_gene_col(tpm_dt)
 counts_gene_col <- detect_gene_col(counts_dt)
@@ -117,6 +197,11 @@ sample_map <- merge(sample_map, eur_map[, .(RNA_ID, IID, FID)], by.x = "run_id",
 sample_map <- sample_map[!duplicated(IID)]
 sample_map <- merge(sample_map, tpm_lookup[, .(run_id, tpm_col = raw_col)], by = "run_id")
 sample_map <- merge(sample_map, counts_lookup[, .(run_id, counts_col = raw_col)], by = "run_id")
+sample_map <- sample_map[!is.na(IID) & !is.na(FID) & !is.na(tpm_col) & !is.na(counts_col)]
+sample_map[, IID := as.character(IID)]
+sample_map[, FID := as.character(FID)]
+sample_map[, tpm_col := as.character(tpm_col)]
+sample_map[, counts_col := as.character(counts_col)]
 setorder(sample_map, IID)
 
 if (nrow(sample_map) == 0L) {
@@ -124,17 +209,79 @@ if (nrow(sample_map) == 0L) {
 }
 log_msg(sprintf("Mapped EUR samples: n = %d", nrow(sample_map)))
 
-tpm_mat <- as.matrix(tpm_dt[, ..sample_map$tpm_col])
-counts_mat <- as.matrix(counts_dt[, ..sample_map$counts_col])
-mode(tpm_mat) <- "numeric"
-mode(counts_mat) <- "numeric"
+tpm_cols <- as.character(sample_map[["tpm_col"]])
+counts_cols <- as.character(sample_map[["counts_col"]])
+iid_vec <- as.character(sample_map[["IID"]])
+
+if (length(tpm_cols) != nrow(sample_map) || length(counts_cols) != nrow(sample_map)) {
+  stop("Internal sample_map mismatch between rows and mapped column vectors.")
+}
+if (anyDuplicated(iid_vec) > 0L) {
+  dup_iid <- unique(iid_vec[duplicated(iid_vec)])
+  stop("Duplicated IID values after mapping: ", paste(head(dup_iid, 10), collapse = ", "))
+}
+if (anyDuplicated(tpm_cols) > 0L) {
+  dup_cols <- unique(tpm_cols[duplicated(tpm_cols)])
+  stop("Duplicated TPM column mappings detected: ", paste(head(dup_cols, 10), collapse = ", "))
+}
+if (anyDuplicated(counts_cols) > 0L) {
+  dup_cols <- unique(counts_cols[duplicated(counts_cols)])
+  stop("Duplicated count column mappings detected: ", paste(head(dup_cols, 10), collapse = ", "))
+}
+if (!all(tpm_cols %in% names(tpm_dt))) {
+  missing_cols <- setdiff(tpm_cols, names(tpm_dt))
+  stop("Missing TPM columns after mapping: ", paste(head(missing_cols, 10), collapse = ", "))
+}
+if (!all(counts_cols %in% names(counts_dt))) {
+  missing_cols <- setdiff(counts_cols, names(counts_dt))
+  stop("Missing count columns after mapping: ", paste(head(missing_cols, 10), collapse = ", "))
+}
+
+tpm_num_dt <- numeric_sample_dt(tpm_dt, tpm_cols, "TPM matrix")
+counts_num_dt <- numeric_sample_dt(counts_dt, counts_cols, "Count matrix")
+
+tpm_mat <- as.matrix(tpm_num_dt)
+counts_mat <- as.matrix(counts_num_dt)
+storage.mode(tpm_mat) <- "double"
+storage.mode(counts_mat) <- "double"
+if (!is.matrix(tpm_mat) || !is.matrix(counts_mat)) {
+  stop("Failed to build sample matrices from TPM/count tables.")
+}
+log_msg(sprintf(
+  "Matrix dimensions before colnames assignment: TPM=%d x %d, Counts=%d x %d, IID_n=%d",
+  nrow(tpm_mat), ncol(tpm_mat), nrow(counts_mat), ncol(counts_mat), length(iid_vec)
+))
+if (ncol(tpm_mat) != length(iid_vec)) {
+  stop(
+    "TPM matrix/sample ID mismatch: ncol(tpm_mat)=",
+    ncol(tpm_mat),
+    " vs length(IID)=",
+    length(iid_vec),
+    " | first_tpm_cols=",
+    paste(head(colnames(tpm_mat), 5), collapse = ", "),
+    " | first_iids=",
+    paste(head(iid_vec, 5), collapse = ", ")
+  )
+}
+if (ncol(counts_mat) != length(iid_vec)) {
+  stop(
+    "Count matrix/sample ID mismatch: ncol(counts_mat)=",
+    ncol(counts_mat),
+    " vs length(IID)=",
+    length(iid_vec),
+    " | first_count_cols=",
+    paste(head(colnames(counts_mat), 5), collapse = ", "),
+    " | first_iids=",
+    paste(head(iid_vec, 5), collapse = ", ")
+  )
+}
 
 tpm_mat[!is.finite(tpm_mat)] <- 0
 counts_mat[!is.finite(counts_mat)] <- 0
 counts_mat[counts_mat < 0] <- 0
 
-colnames(tpm_mat) <- sample_map$IID
-colnames(counts_mat) <- sample_map$IID
+colnames(tpm_mat) <- iid_vec
+colnames(counts_mat) <- iid_vec
 
 tpm_gene_ids <- strip_gene_version(tpm_dt[[tpm_gene_col]])
 counts_gene_ids <- strip_gene_version(counts_dt[[counts_gene_col]])
@@ -177,6 +324,14 @@ tmm_cpm <- cpm(dge, normalized.lib.sizes = TRUE, log = FALSE, prior.count = 0)
 log_msg("Applying inverse normal transform per gene")
 log_expr <- log2(tmm_cpm + 1)
 int_gene_by_sample <- t(apply(log_expr, 1, inv_norm))
+if (!identical(dim(int_gene_by_sample), dim(log_expr))) {
+  int_gene_by_sample <- matrix(
+    as.numeric(int_gene_by_sample),
+    nrow = nrow(log_expr),
+    ncol = ncol(log_expr),
+    dimnames = list(rownames(log_expr), colnames(log_expr))
+  )
+}
 
 exp_int <- t(int_gene_by_sample) # rows=samples, cols=genes
 if (!identical(rownames(exp_int), sample_map$IID)) {
@@ -185,28 +340,56 @@ if (!identical(rownames(exp_int), sample_map$IID)) {
 
 if (peer_input == "auto") {
   if (N < 150) {
-    target_nk <- 15
+    requested_nk <- 15
   } else if (N < 250) {
-    target_nk <- 30
+    requested_nk <- 30
   } else if (N < 350) {
-    target_nk <- 45
+    requested_nk <- 45
   } else {
-    target_nk <- 60
+    requested_nk <- 60
   }
 } else {
-  target_nk <- as.integer(peer_input)
+  requested_nk <- as.integer(peer_input)
 }
-log_msg(sprintf("Estimating PEER factors: K=%d", target_nk))
+if (!is.finite(requested_nk) || requested_nk < 0L) {
+  stop("Invalid PEER factor request: ", peer_input)
+}
 
-model <- PEER()
-PEER_setPhenoMean(model, exp_int)
-PEER_setNk(model, target_nk)
-PEER_update(model)
+max_peer_nk <- min(nrow(exp_int) - 1L, ncol(exp_int) - 1L)
+if (!is.finite(max_peer_nk)) {
+  max_peer_nk <- 0L
+}
+max_peer_nk <- as.integer(max(0L, max_peer_nk))
 
-peer_mat <- PEER_getX(model)[, -1, drop = FALSE]
-peer_df <- as.data.table(peer_mat)
-if (ncol(peer_df) > 0L) {
-  setnames(peer_df, paste0("PEER", seq_len(ncol(peer_df))))
+target_nk <- as.integer(min(requested_nk, max_peer_nk))
+if (target_nk < requested_nk) {
+  log_msg(sprintf(
+    "Reducing PEER factors from requested K=%d to feasible K=%d (samples=%d, genes=%d)",
+    requested_nk, target_nk, nrow(exp_int), ncol(exp_int)
+  ))
+}
+
+if (target_nk > 0L) {
+  log_msg(sprintf("Estimating PEER factors: K=%d", target_nk))
+  model <- PEER()
+  PEER_setPhenoMean(model, exp_int)
+  PEER_setNk(model, target_nk)
+  tryCatch(
+    PEER_update(model),
+    error = function(e) {
+      stop("PEER_update failed at K=", target_nk, ": ", conditionMessage(e))
+    }
+  )
+
+  peer_x <- PEER_getX(model)
+  peer_mat <- if (ncol(peer_x) > 1L) peer_x[, -1, drop = FALSE] else matrix(nrow = nrow(peer_x), ncol = 0L)
+  peer_df <- as.data.table(peer_mat)
+  if (ncol(peer_df) > 0L) {
+    setnames(peer_df, paste0("PEER", seq_len(ncol(peer_df))))
+  }
+} else {
+  log_msg("Skipping PEER factors: not enough dimensions after filtering.")
+  peer_df <- data.table()
 }
 peer_df[, IID := rownames(exp_int)]
 peer_df <- merge(peer_df, sample_map[, .(IID, FID)], by = "IID", all.x = TRUE)
@@ -215,6 +398,12 @@ setnames(pca, c("FID", "IID", paste0("PC", seq_len(ncol(pca) - 2L))))
 pc_cols <- paste0("PC", seq_len(min(n_pcs, ncol(pca) - 2L)))
 pca_subset <- pca[, c("FID", "IID", pc_cols), with = FALSE]
 final_covar <- merge(pca_subset, peer_df, by = c("FID", "IID"))
+if (nrow(final_covar) == 0L) {
+  stop(
+    "No samples remained after PCA/PEER merge. ",
+    "Check IID/FID consistency across eigenvec/map/FAM."
+  )
+}
 
 fwrite(final_covar, paste0(out_prefix, ".qcovar"), sep = "\t", col.names = FALSE)
 
@@ -224,6 +413,9 @@ setcolorder(pheno_dt, c("FID", "IID", setdiff(names(pheno_dt), c("FID", "IID")))
 
 ordered_ids <- final_covar[, .(FID, IID)]
 pheno_final <- merge(ordered_ids, pheno_dt, by = c("FID", "IID"))
+if (nrow(pheno_final) == 0L) {
+  stop("No rows in final phenotype table after covariate ordering merge.")
+}
 fwrite(pheno_final, paste0(out_prefix, ".phenotypes.tsv"), sep = "\t", col.names = FALSE)
 
 genes <- names(pheno_final)[-(1:2)]
