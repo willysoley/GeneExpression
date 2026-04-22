@@ -125,6 +125,7 @@ process GENERATE_PCA {
     path bim
     path fam
     path keep_list
+    val hm3_extract_arg
 
     output:
     path "geno_pca.eigenvec", emit: eigenvec
@@ -134,6 +135,7 @@ process GENERATE_PCA {
     """
     ${params.gcta_path} --bfile ${bed.baseName} \
         --keep ${keep_list} \
+        ${hm3_extract_arg} \
         --make-grm --out genotype_grm --thread-num ${task.cpus}
 
     ${params.gcta_path} --grm genotype_grm --pca ${params.n_pcs} --out geno_pca --thread-num ${task.cpus}
@@ -261,6 +263,7 @@ workflow {
 
     params.tpm_file = mustExist("tpm_file", params.tpm_file)
     params.counts_file = mustExist("counts_file", params.counts_file)
+    params.use_hm3_no_hla = params.use_hm3_no_hla in [true, "true", "TRUE", "1", 1]
 
     def canonicalPrepCandidates = [
         "${projectDir}/nf/bin/prepare_phenotypes.R",
@@ -298,6 +301,14 @@ workflow {
     def bed_path = mustExist("plink bed", "${params.plink_prefix}.bed")
     def bim_path = mustExist("plink bim", "${params.plink_prefix}.bim")
     def fam_path = mustExist("plink fam", "${params.plink_prefix}.fam")
+    def hm3_extract_arg = ""
+    if (params.use_hm3_no_hla) {
+        def hm3_path = mustExist("hm3_no_hla_snplist", params.hm3_no_hla_snplist)
+        hm3_extract_arg = "--extract ${hm3_path}"
+        log.info "SNP mode: HM3 no-HLA enabled via ${hm3_path}"
+    } else {
+        log.info "SNP mode: all variants from plink_prefix (HM3 no-HLA disabled)"
+    }
 
     tpm_ch = Channel.value(file(params.tpm_file))
     counts_ch = Channel.value(file(params.counts_file))
@@ -307,7 +318,7 @@ workflow {
 
     FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
 
-    GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file)
+    GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg)
 
     PREPARE_PHENOTYPES(
         tpm_ch,
