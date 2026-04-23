@@ -286,7 +286,7 @@ workflow {
         "${launchDir}/nf/bin/prepare_phenotypes.R"
     ].unique()
     def prepScript = params.prepare_pheno_script?.toString()
-    if (!prepScript || prepDefaults.contains(prepScript)) {
+    if (!prepScript || !file(prepScript).exists() || prepDefaults.contains(prepScript)) {
         prepScript = prepDefaults.find { file(it).exists() } ?: prepScript
     }
     def selectedPrepMeta = validatePreparePhenoScript(
