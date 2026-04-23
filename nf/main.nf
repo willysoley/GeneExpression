@@ -246,12 +246,12 @@ process SUMMARIZE_RESULTS {
     path all_stats
 
     output:
-    path "final_heritability_summary.tsv"
+    path "${params.summary_filename}"
 
     script:
     """
-    echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > final_heritability_summary.tsv
-    cat *.stats >> final_heritability_summary.tsv
+    echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > ${params.summary_filename}
+    cat *.stats >> ${params.summary_filename}
     """
 }
 
@@ -320,23 +320,42 @@ workflow {
 
     GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg)
 
-    PREPARE_PHENOTYPES(
-        tpm_ch,
-        counts_ch,
-        FILTER_EUROPEANS.out.map_file,
-        GENERATE_PCA.out.eigenvec,
-        fam_ch,
-        params.peer_nk
-    )
+    def reusePhenoDir = params.reuse_pheno_dir?.toString()?.trim()
+    def pheno_ch
+    def qcovar_ch
+    def map_ch
 
-    gene_ch = PREPARE_PHENOTYPES.out.map
+    if (reusePhenoDir) {
+        def reuseDirPath = mustExist("reuse_pheno_dir", reusePhenoDir)
+        def reusedPheno = mustExist("reused phenotype file", "${reuseDirPath}/final.phenotypes.tsv")
+        def reusedQcovar = mustExist("reused qcovar file", "${reuseDirPath}/final.qcovar")
+        def reusedMap = mustExist("reused gene index map", "${reuseDirPath}/gene_index_map.txt")
+        log.info "Phenotype mode: reusing existing prepared files from ${reuseDirPath}"
+        pheno_ch = Channel.value(file(reusedPheno))
+        qcovar_ch = Channel.value(file(reusedQcovar))
+        map_ch = Channel.value(file(reusedMap))
+    } else {
+        PREPARE_PHENOTYPES(
+            tpm_ch,
+            counts_ch,
+            FILTER_EUROPEANS.out.map_file,
+            GENERATE_PCA.out.eigenvec,
+            fam_ch,
+            params.peer_nk
+        )
+        pheno_ch = PREPARE_PHENOTYPES.out.pheno.first()
+        qcovar_ch = PREPARE_PHENOTYPES.out.qcovar.first()
+        map_ch = PREPARE_PHENOTYPES.out.map
+    }
+
+    gene_ch = map_ch
         .splitCsv(sep: '\t', header: true)
         .map { row -> tuple(row.gene_name, row.mpheno_index) }
 
     ESTIMATE_HERITABILITY(
         gene_ch,
-        PREPARE_PHENOTYPES.out.pheno.first(),
-        PREPARE_PHENOTYPES.out.qcovar.first(),
+        pheno_ch,
+        qcovar_ch,
         GENERATE_PCA.out.grm.collect()
     )
 
