@@ -17,6 +17,7 @@ def mustExist = { label, p ->
 def requiredPrepareDiagnostics = [
     "Applying mandatory GTEx-style filter",
     "Running TMM normalization on raw counts",
+    "Expression source:",
     "Normalization mode:",
     "Phenotype prep completed successfully"
 ]
@@ -167,7 +168,7 @@ process PREPARE_PHENOTYPES {
     """
     set -euo pipefail
 
-    echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), normalization=${params.normalization_type}"
+    echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), expression_source=${params.expression_source}, normalization=${params.normalization_type}"
 
     Rscript ${params.prepare_pheno_script} \
       ${tpm} \
@@ -181,6 +182,7 @@ process PREPARE_PHENOTYPES {
       ${params.gtex_count_threshold} \
       ${params.gtex_sample_frac_threshold} \
       ${params.n_pcs} \
+      ${params.expression_source} \
       ${params.normalization_type} \
       2>&1 | tee prepare_phenotypes.log
 
@@ -196,6 +198,10 @@ process PREPARE_PHENOTYPES {
     done
     if ! grep -Fq "Normalization mode: ${params.normalization_type}" prepare_phenotypes.log; then
       echo "ERROR: Normalization mode did not propagate to prepare_phenotypes.R" >&2
+      exit 1
+    fi
+    if ! grep -Fq "Expression source: ${params.expression_source}" prepare_phenotypes.log; then
+      echo "ERROR: Expression source did not propagate to prepare_phenotypes.R" >&2
       exit 1
     fi
     """
@@ -270,20 +276,30 @@ workflow {
     params.tpm_file = mustExist("tpm_file", params.tpm_file)
     params.counts_file = mustExist("counts_file", params.counts_file)
     params.use_hm3_no_hla = params.use_hm3_no_hla in [true, "true", "TRUE", "1", 1]
+    params.expression_source = (params.expression_source ?: "tmm").toString().trim().toLowerCase()
+    def allowedExpressionSource = ["tmm", "tpm"]
+    if (!allowedExpressionSource.contains(params.expression_source)) {
+        error "Invalid expression_source='${params.expression_source}'. Allowed: ${allowedExpressionSource.join(', ')}"
+    }
     params.normalization_type = (params.normalization_type ?: "irnt").toString().trim().toLowerCase()
     if (params.normalization_type == "ukb_irnt") {
         log.info "normalization_type=ukb_irnt is deprecated; using irnt."
         params.normalization_type = "irnt"
     }
-    def allowedNormalization = ["irnt", "tmm_only"]
+    if (params.normalization_type == "tmm_only") {
+        log.info "normalization_type=tmm_only is deprecated; using raw."
+        params.normalization_type = "raw"
+    }
+    def allowedNormalization = ["irnt", "inverse_normal", "raw"]
     if (!allowedNormalization.contains(params.normalization_type)) {
         error "Invalid normalization_type='${params.normalization_type}'. Allowed: ${allowedNormalization.join(', ')}"
     }
+    log.info "Phenotype expression_source=${params.expression_source}"
     log.info "Phenotype normalization_type=${params.normalization_type}"
     def snpSetLabel = params.use_hm3_no_hla ? "hm3_no_mhc" : "all_snps"
     def summaryFilename = params.summary_filename?.toString()?.trim()
     if (!summaryFilename) {
-        params.summary_filename = "final_heritability_summary_${snpSetLabel}_${params.normalization_type}.tsv"
+        params.summary_filename = "final_heritability_summary_${snpSetLabel}_${params.expression_source}_${params.normalization_type}.tsv"
     } else {
         params.summary_filename = summaryFilename
     }
