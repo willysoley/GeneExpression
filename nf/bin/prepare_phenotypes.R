@@ -9,11 +9,11 @@ suppressPackageStartupMessages({
 SCRIPT_VERSION <- "prepare_phenotypes.R 2026-04-22c"
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 11) {
+if (length(args) < 11 || length(args) > 12) {
   stop(
     "Usage: prepare_phenotypes.R ",
     "tpm_file counts_file map_file pca_file fam_file out_prefix peer_input ",
-    "tpm_threshold count_threshold sample_frac_threshold n_pcs"
+    "tpm_threshold count_threshold sample_frac_threshold n_pcs [normalization_type]"
   )
 }
 
@@ -28,6 +28,23 @@ tpm_threshold <- as.numeric(args[8])
 count_threshold <- as.numeric(args[9])
 sample_frac_threshold <- as.numeric(args[10])
 n_pcs <- as.integer(args[11])
+normalization_type <- if (length(args) >= 12L) {
+  tolower(trimws(args[12]))
+} else {
+  "irnt"
+}
+if (identical(normalization_type, "ukb_irnt")) {
+  normalization_type <- "irnt"
+}
+allowed_normalization_types <- c("irnt", "tmm_only")
+if (!normalization_type %in% allowed_normalization_types) {
+  stop(
+    "Invalid normalization_type: '",
+    normalization_type,
+    "'. Allowed: ",
+    paste(allowed_normalization_types, collapse = ", ")
+  )
+}
 
 log_msg <- function(msg) {
   cat(sprintf("[%s] %s\n", format(Sys.time(), "%Y-%m-%d %H:%M:%S"), msg))
@@ -164,6 +181,7 @@ if (!file.exists(fam_file)) stop("Missing fam_file: ", fam_file)
 
 log_msg("Loading inputs")
 log_msg(sprintf("Script version: %s", SCRIPT_VERSION))
+log_msg(sprintf("Normalization mode: %s", normalization_type))
 eur_map <- fread(map_file) # RNA_ID, IID, FID
 pca <- fread(pca_file, header = FALSE)
 fam <- fread(fam_file, header = FALSE)
@@ -321,19 +339,24 @@ dge <- DGEList(counts = counts_filt)
 dge <- calcNormFactors(dge, method = "TMM")
 tmm_cpm <- cpm(dge, normalized.lib.sizes = TRUE, log = FALSE, prior.count = 0)
 
-log_msg("Applying inverse normal transform per gene")
 log_expr <- log2(tmm_cpm + 1)
-int_gene_by_sample <- t(apply(log_expr, 1, inv_norm))
-if (!identical(dim(int_gene_by_sample), dim(log_expr))) {
-  int_gene_by_sample <- matrix(
-    as.numeric(int_gene_by_sample),
-    nrow = nrow(log_expr),
-    ncol = ncol(log_expr),
-    dimnames = list(rownames(log_expr), colnames(log_expr))
-  )
+if (identical(normalization_type, "irnt")) {
+  log_msg("Applying inverse normal transform per gene")
+  transformed_gene_by_sample <- t(apply(log_expr, 1, inv_norm))
+  if (!identical(dim(transformed_gene_by_sample), dim(log_expr))) {
+    transformed_gene_by_sample <- matrix(
+      as.numeric(transformed_gene_by_sample),
+      nrow = nrow(log_expr),
+      ncol = ncol(log_expr),
+      dimnames = list(rownames(log_expr), colnames(log_expr))
+    )
+  }
+} else {
+  log_msg("Skipping inverse normal transform; using log2(TMM CPM + 1) directly")
+  transformed_gene_by_sample <- log_expr
 }
 
-exp_int <- t(int_gene_by_sample) # rows=samples, cols=genes
+exp_int <- t(transformed_gene_by_sample) # rows=samples, cols=genes
 if (!identical(rownames(exp_int), sample_map$IID)) {
   rownames(exp_int) <- sample_map$IID
 }

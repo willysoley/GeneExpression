@@ -17,6 +17,7 @@ def mustExist = { label, p ->
 def requiredPrepareDiagnostics = [
     "Applying mandatory GTEx-style filter",
     "Running TMM normalization on raw counts",
+    "Normalization mode:",
     "Phenotype prep completed successfully"
 ]
 
@@ -166,7 +167,7 @@ process PREPARE_PHENOTYPES {
     """
     set -euo pipefail
 
-    echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), TMM on counts, then INT"
+    echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), normalization=${params.normalization_type}"
 
     Rscript ${params.prepare_pheno_script} \
       ${tpm} \
@@ -180,6 +181,7 @@ process PREPARE_PHENOTYPES {
       ${params.gtex_count_threshold} \
       ${params.gtex_sample_frac_threshold} \
       ${params.n_pcs} \
+      ${params.normalization_type} \
       2>&1 | tee prepare_phenotypes.log
 
     required_diagnostics=(
@@ -192,6 +194,10 @@ process PREPARE_PHENOTYPES {
         exit 1
       fi
     done
+    if ! grep -Fq "Normalization mode: ${params.normalization_type}" prepare_phenotypes.log; then
+      echo "ERROR: Normalization mode did not propagate to prepare_phenotypes.R" >&2
+      exit 1
+    fi
     """
 }
 
@@ -264,6 +270,24 @@ workflow {
     params.tpm_file = mustExist("tpm_file", params.tpm_file)
     params.counts_file = mustExist("counts_file", params.counts_file)
     params.use_hm3_no_hla = params.use_hm3_no_hla in [true, "true", "TRUE", "1", 1]
+    params.normalization_type = (params.normalization_type ?: "irnt").toString().trim().toLowerCase()
+    if (params.normalization_type == "ukb_irnt") {
+        log.info "normalization_type=ukb_irnt is deprecated; using irnt."
+        params.normalization_type = "irnt"
+    }
+    def allowedNormalization = ["irnt", "tmm_only"]
+    if (!allowedNormalization.contains(params.normalization_type)) {
+        error "Invalid normalization_type='${params.normalization_type}'. Allowed: ${allowedNormalization.join(', ')}"
+    }
+    log.info "Phenotype normalization_type=${params.normalization_type}"
+    def snpSetLabel = params.use_hm3_no_hla ? "hm3_no_mhc" : "all_snps"
+    def summaryFilename = params.summary_filename?.toString()?.trim()
+    if (!summaryFilename) {
+        params.summary_filename = "final_heritability_summary_${snpSetLabel}_${params.normalization_type}.tsv"
+    } else {
+        params.summary_filename = summaryFilename
+    }
+    log.info "Summary filename=${params.summary_filename}"
 
     def canonicalPrepCandidates = [
         "${projectDir}/nf/bin/prepare_phenotypes.R",
