@@ -167,10 +167,10 @@ process PREPARE_PHENOTYPES {
     val pheno_prefix
 
     output:
-    path "${pheno_prefix}.phenotypes.tsv", emit: pheno
-    path "${pheno_prefix}.qcovar", emit: qcovar
-    path "${pheno_prefix}.gene_index_map.txt", emit: map
-    path "${pheno_prefix}.filtered_gene_ids.txt", emit: filtered_genes
+    path "*.phenotypes.tsv", emit: pheno, arity: '1'
+    path "*.qcovar", emit: qcovar, arity: '1'
+    path "*.gene_index_map.txt", emit: map, arity: '1'
+    path "*.filtered_gene_ids.txt", emit: filtered_genes, arity: '1'
 
     script:
     def runtimeDiagnostics = requiredPrepareDiagnostics
@@ -223,6 +223,20 @@ process PREPARE_PHENOTYPES {
       echo "ERROR: Expression source did not propagate to prepare_phenotypes.R" >&2
       exit 1
     fi
+
+    expected_outputs=(
+      "\${pheno_prefix_resolved}.phenotypes.tsv"
+      "\${pheno_prefix_resolved}.qcovar"
+      "\${pheno_prefix_resolved}.gene_index_map.txt"
+      "\${pheno_prefix_resolved}.filtered_gene_ids.txt"
+    )
+    for f in "\${expected_outputs[@]}"; do
+      if [[ ! -s "\${f}" ]]; then
+        echo "ERROR: Expected phenotype output missing or empty: \${f}" >&2
+        ls -lah . >&2
+        exit 1
+      fi
+    done
     """
 }
 
