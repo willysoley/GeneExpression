@@ -256,14 +256,15 @@ process SUMMARIZE_RESULTS {
 
     input:
     path all_stats
+    val summary_file
 
     output:
-    path "${params.summary_filename}"
+    path "${summary_file}"
 
     script:
     """
-    echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > ${params.summary_filename}
-    cat *.stats >> ${params.summary_filename}
+    echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > ${summary_file}
+    cat *.stats >> ${summary_file}
     """
 }
 
@@ -399,5 +400,6 @@ workflow {
         GENERATE_PCA.out.grm.collect()
     )
 
-    SUMMARIZE_RESULTS(ESTIMATE_HERITABILITY.out.stats.collect())
+    def summaryFileCh = Channel.value(params.summary_filename)
+    SUMMARIZE_RESULTS(ESTIMATE_HERITABILITY.out.stats.collect(), summaryFileCh)
 }
