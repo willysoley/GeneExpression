@@ -154,12 +154,14 @@ process PREPARE_PHENOTYPES {
     path pca_file
     path fam_file
     val num_peer
+    val peer_max_genes
+    val pheno_prefix
 
     output:
-    path "final.phenotypes.tsv", emit: pheno
-    path "final.qcovar", emit: qcovar
-    path "gene_index_map.txt", emit: map
-    path "filtered_gene_ids.txt", emit: filtered_genes
+    path "${pheno_prefix}.phenotypes.tsv", emit: pheno
+    path "${pheno_prefix}.qcovar", emit: qcovar
+    path "${pheno_prefix}.gene_index_map.txt", emit: map
+    path "${pheno_prefix}.filtered_gene_ids.txt", emit: filtered_genes
 
     script:
     def runtimeDiagnostics = requiredPrepareDiagnostics
@@ -176,7 +178,7 @@ process PREPARE_PHENOTYPES {
       ${id_map} \
       ${pca_file} \
       ${fam_file} \
-      final \
+      ${pheno_prefix} \
       ${num_peer} \
       ${params.gtex_tpm_threshold} \
       ${params.gtex_count_threshold} \
@@ -184,6 +186,7 @@ process PREPARE_PHENOTYPES {
       ${params.n_pcs} \
       ${params.expression_source} \
       ${params.normalization_type} \
+      ${peer_max_genes} \
       2>&1 | tee prepare_phenotypes.log
 
     required_diagnostics=(
@@ -297,7 +300,15 @@ workflow {
     }
     log.info "Phenotype expression_source=${params.expression_source}"
     log.info "Phenotype normalization_type=${params.normalization_type}"
+    log.info "Phenotype peer_max_genes=${params.peer_max_genes}"
     def snpSetLabel = params.use_hm3_no_hla ? "hm3_no_mhc" : "all_snps"
+    def phenotypePrefix = params.phenotype_prefix?.toString()?.trim()
+    if (!phenotypePrefix) {
+        params.phenotype_prefix = "pheno_${snpSetLabel}_${params.expression_source}_${params.normalization_type}"
+    } else {
+        params.phenotype_prefix = phenotypePrefix
+    }
+    log.info "Phenotype prefix=${params.phenotype_prefix}"
     def summaryFilename = params.summary_filename?.toString()?.trim()
     if (!summaryFilename) {
         params.summary_filename = "final_heritability_summary_${snpSetLabel}_${params.expression_source}_${params.normalization_type}.tsv"
@@ -368,10 +379,28 @@ workflow {
 
     if (reusePhenoDir) {
         def reuseDirPath = mustExist("reuse_pheno_dir", reusePhenoDir)
-        def reusedPheno = mustExist("reused phenotype file", "${reuseDirPath}/final.phenotypes.tsv")
-        def reusedQcovar = mustExist("reused qcovar file", "${reuseDirPath}/final.qcovar")
-        def reusedMap = mustExist("reused gene index map", "${reuseDirPath}/gene_index_map.txt")
-        log.info "Phenotype mode: reusing existing prepared files from ${reuseDirPath}"
+        def prefPheno = file("${reuseDirPath}/${params.phenotype_prefix}.phenotypes.tsv")
+        def prefQcovar = file("${reuseDirPath}/${params.phenotype_prefix}.qcovar")
+        def prefMap = file("${reuseDirPath}/${params.phenotype_prefix}.gene_index_map.txt")
+
+        def reusedPheno
+        def reusedQcovar
+        def reusedMap
+
+        if (prefPheno.exists() && prefQcovar.exists() && prefMap.exists()) {
+            reusedPheno = mustExist("reused phenotype file", prefPheno.toString())
+            reusedQcovar = mustExist("reused qcovar file", prefQcovar.toString())
+            reusedMap = mustExist("reused gene index map", prefMap.toString())
+            log.info "Phenotype mode: reusing combo-specific files (${params.phenotype_prefix}) from ${reuseDirPath}"
+        } else {
+            def legacyPheno = mustExist("reused legacy phenotype file", "${reuseDirPath}/final.phenotypes.tsv")
+            def legacyQcovar = mustExist("reused legacy qcovar file", "${reuseDirPath}/final.qcovar")
+            def legacyMap = mustExist("reused legacy gene index map", "${reuseDirPath}/gene_index_map.txt")
+            reusedPheno = legacyPheno
+            reusedQcovar = legacyQcovar
+            reusedMap = legacyMap
+            log.info "Phenotype mode: combo-specific files not found; using legacy final.* files from ${reuseDirPath}"
+        }
         pheno_ch = Channel.value(file(reusedPheno))
         qcovar_ch = Channel.value(file(reusedQcovar))
         map_ch = Channel.value(file(reusedMap))
@@ -382,7 +411,9 @@ workflow {
             FILTER_EUROPEANS.out.map_file,
             GENERATE_PCA.out.eigenvec,
             fam_ch,
-            params.peer_nk
+            params.peer_nk,
+            params.peer_max_genes,
+            params.phenotype_prefix
         )
         pheno_ch = PREPARE_PHENOTYPES.out.pheno.first()
         qcovar_ch = PREPARE_PHENOTYPES.out.qcovar.first()

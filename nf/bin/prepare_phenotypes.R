@@ -6,15 +6,15 @@ suppressPackageStartupMessages({
   library(peer)
 })
 
-SCRIPT_VERSION <- "prepare_phenotypes.R 2026-04-22c"
+SCRIPT_VERSION <- "prepare_phenotypes.R 2026-04-29a"
 
 args <- commandArgs(trailingOnly = TRUE)
-if (length(args) < 11 || length(args) > 13) {
+if (length(args) < 11 || length(args) > 14) {
   stop(
     "Usage: prepare_phenotypes.R ",
     "tpm_file counts_file map_file pca_file fam_file out_prefix peer_input ",
-    "tpm_threshold count_threshold sample_frac_threshold n_pcs [normalization_type] ",
-    "OR tpm_file ... n_pcs expression_source normalization_type"
+    "tpm_threshold count_threshold sample_frac_threshold n_pcs [normalization_type] [peer_max_genes] ",
+    "OR tpm_file ... n_pcs expression_source normalization_type [peer_max_genes]"
   )
 }
 
@@ -29,17 +29,32 @@ tpm_threshold <- as.numeric(args[8])
 count_threshold <- as.numeric(args[9])
 sample_frac_threshold <- as.numeric(args[10])
 n_pcs <- as.integer(args[11])
-expression_source <- if (length(args) >= 13L) {
-  tolower(trimws(args[12]))
-} else {
-  "tmm"
-}
-normalization_type <- if (length(args) >= 13L) {
-  tolower(trimws(args[13]))
-} else if (length(args) >= 12L) {
-  tolower(trimws(args[12]))
-} else {
-  "irnt"
+allowed_expression_sources <- c("tmm", "tpm")
+expression_source <- "tmm"
+normalization_type <- "irnt"
+peer_max_genes <- 0L
+
+if (length(args) == 12L) {
+  token12 <- tolower(trimws(args[12]))
+  if (token12 %in% allowed_expression_sources) {
+    expression_source <- token12
+  } else {
+    normalization_type <- token12
+  }
+} else if (length(args) == 13L) {
+  token12 <- tolower(trimws(args[12]))
+  token13 <- tolower(trimws(args[13]))
+  if (token12 %in% allowed_expression_sources) {
+    expression_source <- token12
+    normalization_type <- token13
+  } else {
+    normalization_type <- token12
+    peer_max_genes <- suppressWarnings(as.integer(args[13]))
+  }
+} else if (length(args) >= 14L) {
+  expression_source <- tolower(trimws(args[12]))
+  normalization_type <- tolower(trimws(args[13]))
+  peer_max_genes <- suppressWarnings(as.integer(args[14]))
 }
 if (identical(normalization_type, "ukb_irnt")) {
   normalization_type <- "irnt"
@@ -47,7 +62,6 @@ if (identical(normalization_type, "ukb_irnt")) {
 if (identical(normalization_type, "tmm_only")) {
   normalization_type <- "raw"
 }
-allowed_expression_sources <- c("tmm", "tpm")
 if (!expression_source %in% allowed_expression_sources) {
   stop(
     "Invalid expression_source: '",
@@ -64,6 +78,9 @@ if (!normalization_type %in% allowed_normalization_types) {
     "'. Allowed: ",
     paste(allowed_normalization_types, collapse = ", ")
   )
+}
+if (!is.finite(peer_max_genes) || is.na(peer_max_genes) || peer_max_genes < 0L) {
+  peer_max_genes <- 0L
 }
 
 log_msg <- function(msg) {
@@ -116,9 +133,15 @@ numeric_sample_dt <- function(dt, cols, label) {
   for (i in seq_along(cols)) {
     col_name <- cols[[i]]
     raw_vals <- dt[[col_name]]
-    chr_vals <- trimws(as.character(raw_vals))
-    num_vals <- suppressWarnings(as.numeric(chr_vals))
-    bad_mask <- is.na(num_vals) & !is.na(raw_vals) & nzchar(chr_vals)
+    if (is.numeric(raw_vals)) {
+      num_vals <- as.numeric(raw_vals)
+      bad_mask <- rep(FALSE, length(num_vals))
+      chr_vals <- rep("", length(num_vals))
+    } else {
+      chr_vals <- trimws(as.character(raw_vals))
+      num_vals <- suppressWarnings(as.numeric(chr_vals))
+      bad_mask <- is.na(num_vals) & !is.na(raw_vals) & nzchar(chr_vals)
+    }
 
     if (any(bad_mask)) {
       bad_total <- bad_total + sum(bad_mask)
@@ -163,20 +186,21 @@ collapse_gene_matrix <- function(mat, gene_ids, mode = c("mean", "sum")) {
       " matrix rows."
     )
   }
-  dt <- as.data.table(mat)
-  dt[, gene_id_clean := gene_ids]
-
-  if (mode == "mean") {
-    out <- dt[, lapply(.SD, mean, na.rm = TRUE), by = gene_id_clean]
-  } else {
-    out <- dt[, lapply(.SD, sum, na.rm = TRUE), by = gene_id_clean]
+  if (anyDuplicated(gene_ids) == 0L) {
+    rownames(mat) <- gene_ids
+    return(mat)
   }
 
-  gene_out <- out$gene_id_clean
-  out[, gene_id_clean := NULL]
-  mat_out <- as.matrix(out)
-  rownames(mat_out) <- gene_out
-  mat_out
+  g <- as.character(gene_ids)
+  sum_mat <- rowsum(mat, group = g, reorder = FALSE, na.rm = TRUE)
+  if (mode == "sum") {
+    return(sum_mat)
+  }
+
+  non_missing <- rowsum((!is.na(mat)) * 1.0, group = g, reorder = FALSE, na.rm = TRUE)
+  mean_mat <- sum_mat / non_missing
+  mean_mat[!is.finite(mean_mat)] <- NA_real_
+  mean_mat
 }
 
 rank_inverse_normal <- function(x, offset = 0.5) {
@@ -204,9 +228,9 @@ log_msg("Loading inputs")
 log_msg(sprintf("Script version: %s", SCRIPT_VERSION))
 log_msg(sprintf("Expression source: %s", expression_source))
 log_msg(sprintf("Normalization mode: %s", normalization_type))
+log_msg(sprintf("PEER max genes (0 = all): %d", peer_max_genes))
 eur_map <- fread(map_file) # RNA_ID, IID, FID
 pca <- fread(pca_file, header = FALSE)
-fam <- fread(fam_file, header = FALSE)
 tpm_dt <- fread(tpm_file)
 counts_dt <- fread(counts_file)
 require_cols(eur_map, c("RNA_ID", "IID", "FID"), "map_file")
@@ -354,17 +378,17 @@ if (nrow(counts_filt) == 0L) {
   stop("No genes passed mandatory TPM+count filtering.")
 }
 
-writeLines(rownames(counts_filt), "filtered_gene_ids.txt")
-
-log_msg("Running TMM normalization on raw counts")
-dge <- DGEList(counts = counts_filt)
-dge <- calcNormFactors(dge, method = "TMM")
-tmm_cpm <- cpm(dge, normalized.lib.sizes = TRUE, log = FALSE, prior.count = 0)
+writeLines(rownames(counts_filt), paste0(out_prefix, ".filtered_gene_ids.txt"))
 
 expr_base_by_gene <- if (identical(expression_source, "tpm")) {
+  log_msg("Running TMM normalization on raw counts: skipped (expression_source=tpm)")
   log_msg("Using TPM matrix as phenotype source")
   tpm_filt
 } else {
+  log_msg("Running TMM normalization on raw counts")
+  dge <- DGEList(counts = counts_filt)
+  dge <- calcNormFactors(dge, method = "TMM")
+  tmm_cpm <- cpm(dge, normalized.lib.sizes = TRUE, log = FALSE, prior.count = 0)
   log_msg("Using TMM-normalized CPM matrix as phenotype source")
   tmm_cpm
 }
@@ -381,18 +405,43 @@ if (identical(normalization_type, "raw")) {
     "Applying inverse normal transform per gene (offset c=0.5)"
   }
   log_msg(norm_label)
-  transformed_gene_by_sample <- t(apply(
-    log_expr,
-    1,
-    function(x) rank_inverse_normal(x, offset = norm_offset)
-  ))
-  if (!identical(dim(transformed_gene_by_sample), dim(log_expr))) {
+  if (requireNamespace("matrixStats", quietly = TRUE)) {
+    ok <- is.finite(log_expr)
+    work <- log_expr
+    work[!ok] <- NA_real_
+    rr <- matrixStats::rowRanks(work, ties.method = "average", preserveShape = TRUE)
+    n_ok <- rowSums(ok)
+    denom <- n_ok - 2 * norm_offset + 1
     transformed_gene_by_sample <- matrix(
-      as.numeric(transformed_gene_by_sample),
-      nrow = nrow(log_expr),
-      ncol = ncol(log_expr),
-      dimnames = list(rownames(log_expr), colnames(log_expr))
+      NA_real_,
+      nrow = nrow(work),
+      ncol = ncol(work),
+      dimnames = dimnames(work)
     )
+    valid_rows <- which(n_ok > 1L)
+    for (i in valid_rows) {
+      idx <- ok[i, ]
+      transformed_gene_by_sample[i, idx] <- qnorm((rr[i, idx] - norm_offset) / denom[i])
+    }
+    singleton_rows <- which(n_ok == 1L)
+    for (i in singleton_rows) {
+      idx <- ok[i, ]
+      transformed_gene_by_sample[i, idx] <- 0
+    }
+  } else {
+    transformed_gene_by_sample <- t(apply(
+      log_expr,
+      1,
+      function(x) rank_inverse_normal(x, offset = norm_offset)
+    ))
+    if (!identical(dim(transformed_gene_by_sample), dim(log_expr))) {
+      transformed_gene_by_sample <- matrix(
+        as.numeric(transformed_gene_by_sample),
+        nrow = nrow(log_expr),
+        ncol = ncol(log_expr),
+        dimnames = list(rownames(log_expr), colnames(log_expr))
+      )
+    }
   }
 }
 
@@ -402,6 +451,7 @@ if (!identical(rownames(exp_int), sample_map$IID)) {
 }
 
 if (peer_input == "auto") {
+  log_msg("PEER auto rule (GTEx): 15 if N<150, 30 if 150<=N<250, 45 if 250<=N<350, 60 if N>=350")
   if (N < 150) {
     requested_nk <- 15
   } else if (N < 250) {
@@ -411,8 +461,10 @@ if (peer_input == "auto") {
   } else {
     requested_nk <- 60
   }
+  log_msg(sprintf("Auto-selected PEER request K=%d using N=%d samples", requested_nk, N))
 } else {
   requested_nk <- as.integer(peer_input)
+  log_msg(sprintf("User-specified PEER request K=%d", requested_nk))
 }
 if (!is.finite(requested_nk) || requested_nk < 0L) {
   stop("Invalid PEER factor request: ", peer_input)
@@ -433,22 +485,48 @@ if (target_nk < requested_nk) {
 }
 
 if (target_nk > 0L) {
-  log_msg(sprintf("Estimating PEER factors: K=%d", target_nk))
-  model <- PEER()
-  PEER_setPhenoMean(model, exp_int)
-  PEER_setNk(model, target_nk)
-  tryCatch(
-    PEER_update(model),
-    error = function(e) {
-      stop("PEER_update failed at K=", target_nk, ": ", conditionMessage(e))
-    }
-  )
+  peer_expr <- exp_int
+  if (peer_max_genes > 0L && ncol(peer_expr) > peer_max_genes) {
+    gene_var <- apply(peer_expr, 2, var, na.rm = TRUE)
+    gene_var[!is.finite(gene_var)] <- -Inf
+    keep_idx <- order(gene_var, decreasing = TRUE)[seq_len(peer_max_genes)]
+    peer_expr <- peer_expr[, keep_idx, drop = FALSE]
+    log_msg(sprintf(
+      "PEER input genes reduced by variance ranking: %d -> %d genes",
+      ncol(exp_int), ncol(peer_expr)
+    ))
+  }
+  subset_max_peer_nk <- min(nrow(peer_expr) - 1L, ncol(peer_expr) - 1L)
+  subset_max_peer_nk <- as.integer(max(0L, subset_max_peer_nk))
+  if (target_nk > subset_max_peer_nk) {
+    log_msg(sprintf(
+      "Reducing PEER factors after gene subsetting: K=%d -> K=%d",
+      target_nk, subset_max_peer_nk
+    ))
+    target_nk <- subset_max_peer_nk
+  }
+  if (target_nk < 1L) {
+    log_msg("Skipping PEER factors: not enough dimensions after PEER gene subsetting.")
+    peer_df <- data.table()
+  } else {
 
-  peer_x <- PEER_getX(model)
-  peer_mat <- if (ncol(peer_x) > 1L) peer_x[, -1, drop = FALSE] else matrix(nrow = nrow(peer_x), ncol = 0L)
-  peer_df <- as.data.table(peer_mat)
-  if (ncol(peer_df) > 0L) {
-    setnames(peer_df, paste0("PEER", seq_len(ncol(peer_df))))
+    log_msg(sprintf("Estimating PEER factors: K=%d", target_nk))
+    model <- PEER()
+    PEER_setPhenoMean(model, peer_expr)
+    PEER_setNk(model, target_nk)
+    tryCatch(
+      PEER_update(model),
+      error = function(e) {
+        stop("PEER_update failed at K=", target_nk, ": ", conditionMessage(e))
+      }
+    )
+
+    peer_x <- PEER_getX(model)
+    peer_mat <- if (ncol(peer_x) > 1L) peer_x[, -1, drop = FALSE] else matrix(nrow = nrow(peer_x), ncol = 0L)
+    peer_df <- as.data.table(peer_mat)
+    if (ncol(peer_df) > 0L) {
+      setnames(peer_df, paste0("PEER", seq_len(ncol(peer_df))))
+    }
   }
 } else {
   log_msg("Skipping PEER factors: not enough dimensions after filtering.")
@@ -458,6 +536,8 @@ peer_df[, IID := rownames(exp_int)]
 peer_df <- merge(peer_df, sample_map[, .(IID, FID)], by = "IID", all.x = TRUE)
 
 setnames(pca, c("FID", "IID", paste0("PC", seq_len(ncol(pca) - 2L))))
+pca[, FID := as.character(FID)]
+pca[, IID := as.character(IID)]
 pc_cols <- paste0("PC", seq_len(min(n_pcs, ncol(pca) - 2L)))
 pca_subset <- pca[, c("FID", "IID", pc_cols), with = FALSE]
 final_covar <- merge(pca_subset, peer_df, by = c("FID", "IID"))
@@ -486,6 +566,6 @@ map_dt <- data.table(
   gene_name = genes,
   mpheno_index = seq_along(genes)
 )
-fwrite(map_dt, "gene_index_map.txt", sep = "\t")
+fwrite(map_dt, paste0(out_prefix, ".gene_index_map.txt"), sep = "\t")
 
 log_msg("Phenotype prep completed successfully")
