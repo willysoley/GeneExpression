@@ -262,12 +262,30 @@ process SUMMARIZE_RESULTS {
     val summary_file
 
     output:
-    path "${summary_file}"
+    path "${summary_file}", emit: summary
 
     script:
     """
     echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > ${summary_file}
     cat *.stats >> ${summary_file}
+    """
+}
+
+process COMPRESS_PHENOTYPE {
+    publishDir "${params.outdir}/data", mode: 'copy'
+
+    input:
+    path pheno_tsv
+    path summary_file
+
+    output:
+    path "*.phenotypes.tsv.gz", emit: pheno_gz
+
+    script:
+    """
+    set -euo pipefail
+    test -s "${summary_file}"
+    gzip -c "${pheno_tsv}" > "${pheno_tsv.getName()}.gz"
     """
 }
 
@@ -432,5 +450,7 @@ workflow {
     )
 
     def summaryFileCh = Channel.value(params.summary_filename)
-    SUMMARIZE_RESULTS(ESTIMATE_HERITABILITY.out.stats.collect(), summaryFileCh)
+    def allStatsCh = ESTIMATE_HERITABILITY.out.stats.collect()
+    SUMMARIZE_RESULTS(allStatsCh, summaryFileCh)
+    COMPRESS_PHENOTYPE(pheno_ch, SUMMARIZE_RESULTS.out.summary)
 }
