@@ -53,6 +53,14 @@ def validatePreparePhenoScript = { label, scriptPath, requiredMarkers ->
     [path: resolvedPath, sha256: sha256, mtimeUtc: mtimeUtc]
 }
 
+def normalizeMaybeQuotedEmpty = { value ->
+    def s = value?.toString()
+    if (s == null) return ""
+    s = s.trim()
+    if (s == '""' || s == "''") return ""
+    s
+}
+
 process FILTER_EUROPEANS {
     input:
     val sdrf_url
@@ -167,26 +175,32 @@ process PREPARE_PHENOTYPES {
     def runtimeDiagnostics = requiredPrepareDiagnostics
         .collect { marker -> "\"${marker}\"" }
         .join("\n      ")
+    def fallbackPrefix = "pheno_${params.use_hm3_no_hla ? 'hm3_no_mhc' : 'all_snps'}_${params.expression_source}_${params.normalization_type}"
     """
     set -euo pipefail
+    pheno_prefix_resolved="${pheno_prefix:-}"
+    if [[ -z "\${pheno_prefix_resolved}" ]]; then
+      pheno_prefix_resolved="${fallbackPrefix}"
+      echo "WARN: Received empty pheno_prefix in PREPARE_PHENOTYPES; using fallback=\${pheno_prefix_resolved}"
+    fi
 
     echo "Starting phenotype prep: TPM+count filter (GTEx-style mandatory), expression_source=${params.expression_source}, normalization=${params.normalization_type}"
 
     Rscript ${params.prepare_pheno_script} \
-      ${tpm} \
-      ${counts} \
-      ${id_map} \
-      ${pca_file} \
-      ${fam_file} \
-      ${pheno_prefix} \
-      ${num_peer} \
-      ${params.gtex_tpm_threshold} \
-      ${params.gtex_count_threshold} \
-      ${params.gtex_sample_frac_threshold} \
-      ${params.n_pcs} \
-      ${params.expression_source} \
-      ${params.normalization_type} \
-      ${peer_max_genes} \
+      "${tpm}" \
+      "${counts}" \
+      "${id_map}" \
+      "${pca_file}" \
+      "${fam_file}" \
+      "\${pheno_prefix_resolved}" \
+      "${num_peer}" \
+      "${params.gtex_tpm_threshold}" \
+      "${params.gtex_count_threshold}" \
+      "${params.gtex_sample_frac_threshold}" \
+      "${params.n_pcs}" \
+      "${params.expression_source}" \
+      "${params.normalization_type}" \
+      "${peer_max_genes}" \
       2>&1 | tee prepare_phenotypes.log
 
     required_diagnostics=(
@@ -320,14 +334,14 @@ workflow {
     log.info "Phenotype normalization_type=${params.normalization_type}"
     log.info "Phenotype peer_max_genes=${params.peer_max_genes}"
     def snpSetLabel = params.use_hm3_no_hla ? "hm3_no_mhc" : "all_snps"
-    def phenotypePrefix = params.phenotype_prefix?.toString()?.trim()
+    def phenotypePrefix = normalizeMaybeQuotedEmpty(params.phenotype_prefix)
     if (!phenotypePrefix) {
         params.phenotype_prefix = "pheno_${snpSetLabel}_${params.expression_source}_${params.normalization_type}"
     } else {
         params.phenotype_prefix = phenotypePrefix
     }
     log.info "Phenotype prefix=${params.phenotype_prefix}"
-    def summaryFilename = params.summary_filename?.toString()?.trim()
+    def summaryFilename = normalizeMaybeQuotedEmpty(params.summary_filename)
     if (!summaryFilename) {
         params.summary_filename = "final_heritability_summary_${snpSetLabel}_${params.expression_source}_${params.normalization_type}.tsv"
     } else {
@@ -433,8 +447,8 @@ workflow {
             params.peer_max_genes,
             params.phenotype_prefix
         )
-        pheno_ch = PREPARE_PHENOTYPES.out.pheno.first()
-        qcovar_ch = PREPARE_PHENOTYPES.out.qcovar.first()
+        pheno_ch = PREPARE_PHENOTYPES.out.pheno
+        qcovar_ch = PREPARE_PHENOTYPES.out.qcovar
         map_ch = PREPARE_PHENOTYPES.out.map
     }
 
