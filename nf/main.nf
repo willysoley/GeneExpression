@@ -128,7 +128,7 @@ process FILTER_EUROPEANS {
 }
 
 process GENERATE_PCA {
-    publishDir "${params.outdir}/pca", mode: 'copy'
+    publishDir { "${params.outdir}/pca/${pca_label}" }, mode: 'copy'
 
     input:
     path bed
@@ -136,6 +136,7 @@ process GENERATE_PCA {
     path fam
     path keep_list
     val hm3_extract_arg
+    val pca_label
 
     output:
     path "geno_pca.eigenvec", emit: eigenvec
@@ -176,9 +177,10 @@ process PREPARE_PHENOTYPES {
         .collect { marker -> "\"${marker}\"" }
         .join("\n      ")
     def fallbackPrefix = "pheno_${params.use_hm3_no_hla ? 'hm3_no_mhc' : 'all_snps'}_${params.expression_source}_${params.normalization_type}"
+    def incomingPhenoPrefix = pheno_prefix?.toString() ?: ""
     """
     set -euo pipefail
-    pheno_prefix_resolved="${pheno_prefix:-}"
+    pheno_prefix_resolved="${incomingPhenoPrefix}"
     if [[ -z "\${pheno_prefix_resolved}" ]]; then
       pheno_prefix_resolved="${fallbackPrefix}"
       echo "WARN: Received empty pheno_prefix in PREPARE_PHENOTYPES; using fallback=\${pheno_prefix_resolved}"
@@ -334,16 +336,17 @@ workflow {
     log.info "Phenotype normalization_type=${params.normalization_type}"
     log.info "Phenotype peer_max_genes=${params.peer_max_genes}"
     def snpSetLabel = params.use_hm3_no_hla ? "hm3_no_mhc" : "all_snps"
+    def runLabel = "${snpSetLabel}_${params.expression_source}_${params.normalization_type}"
     def phenotypePrefix = normalizeMaybeQuotedEmpty(params.phenotype_prefix)
     if (!phenotypePrefix) {
-        params.phenotype_prefix = "pheno_${snpSetLabel}_${params.expression_source}_${params.normalization_type}"
+        params.phenotype_prefix = "pheno_${runLabel}"
     } else {
         params.phenotype_prefix = phenotypePrefix
     }
     log.info "Phenotype prefix=${params.phenotype_prefix}"
     def summaryFilename = normalizeMaybeQuotedEmpty(params.summary_filename)
     if (!summaryFilename) {
-        params.summary_filename = "final_heritability_summary_${snpSetLabel}_${params.expression_source}_${params.normalization_type}.tsv"
+        params.summary_filename = "final_heritability_summary_${runLabel}.tsv"
     } else {
         params.summary_filename = summaryFilename
     }
@@ -402,7 +405,7 @@ workflow {
 
     FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
 
-    GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg)
+    GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg, runLabel)
 
     def reusePhenoDir = params.reuse_pheno_dir?.toString()?.trim()
     def pheno_ch
