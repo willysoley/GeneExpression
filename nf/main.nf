@@ -241,12 +241,14 @@ process ESTIMATE_HERITABILITY {
     path "${gene_name}.stats", emit: stats
 
     script:
+    // GRM files are staged via `grm_files`; GCTA reads them by this fixed basename.
+    def grmPrefix = "genotype_grm"
     """
-    ${params.gcta_path} --grm ${params.grm_prefix} \
+    ${params.gcta_path} --grm ${grmPrefix} \
         --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
         --reml --out ${gene_name}_greml --thread-num 1 || echo "GREML_FAIL"
 
-    ${params.gcta_path} --grm ${params.grm_prefix} \
+    ${params.gcta_path} --grm ${grmPrefix} \
         --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
         --HEreg --out ${gene_name}_he --thread-num 1 || echo "HE_FAIL"
 
@@ -397,11 +399,11 @@ workflow {
         log.info "SNP mode: all variants from plink_prefix (HM3 no-HLA disabled)"
     }
 
-    tpm_ch = Channel.value(file(params.tpm_file))
-    counts_ch = Channel.value(file(params.counts_file))
-    bed_ch = Channel.value(file(bed_path))
-    bim_ch = Channel.value(file(bim_path))
-    fam_ch = Channel.value(file(fam_path))
+    def tpm_ch = Channel.value(file(params.tpm_file))
+    def counts_ch = Channel.value(file(params.counts_file))
+    def bed_ch = Channel.value(file(bed_path))
+    def bim_ch = Channel.value(file(bim_path))
+    def fam_ch = Channel.value(file(fam_path))
 
     FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
 
@@ -455,7 +457,7 @@ workflow {
         map_ch = PREPARE_PHENOTYPES.out.map
     }
 
-    gene_ch = map_ch
+    def gene_ch = map_ch
         .splitCsv(sep: '\t', header: true)
         .map { row -> tuple(row.gene_name, row.mpheno_index) }
 

@@ -13,10 +13,14 @@ set -euo pipefail
 # that path may be Slurm spool (/cm/local/apps/slurm/...).
 # Defaults:
 #   project root = submit dir
-#   run dir      = submit dir
+#   run root     = submit dir
 # Overrides:
 #   GREML_PROJECT_ROOT=/abs/path/to/GeneExpression
 #   GREML_RUN_DIR=/abs/path/for/results_and-logs
+# Behavior:
+#   by default each parameter combination gets its own launch dir under:
+#     ${GREML_RUN_DIR}/runs/<combo-label>_<combo-hash>
+#   set GREML_ISOLATE_BY_COMBO=0 to keep legacy shared launch dir behavior
 resolve_dir() {
   local dir="$1"
   if [[ ! -d "${dir}" ]]; then
@@ -44,6 +48,120 @@ sha256_file() {
   exit 2
 }
 
+sha256_text() {
+  local text="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    printf '%s' "${text}" | sha256sum | awk '{print $1}'
+    return
+  fi
+  if command -v shasum >/dev/null 2>&1; then
+    printf '%s' "${text}" | shasum -a 256 | awk '{print $1}'
+    return
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    printf '%s' "${text}" | openssl dgst -sha256 | awk '{print $NF}'
+    return
+  fi
+  echo "ERROR: No SHA-256 tool found (need sha256sum, shasum, or openssl)." >&2
+  exit 2
+}
+
+to_lower() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]'
+}
+
+sanitize_slug() {
+  local raw="$1"
+  raw="$(to_lower "${raw}")"
+  raw="$(printf '%s' "${raw}" | sed -E 's/[^a-z0-9._-]+/_/g; s/_+/_/g; s/^_+//; s/_+$//')"
+  if [[ -z "${raw}" ]]; then
+    raw="na"
+  fi
+  printf '%s' "${raw}"
+}
+
+normalize_bool() {
+  local raw
+  raw="$(to_lower "$1")"
+  case "${raw}" in
+    1|true|t|yes|y|on) printf 'true' ;;
+    0|false|f|no|n|off) printf 'false' ;;
+    *)
+      echo "ERROR: Invalid boolean value '${1}'." >&2
+      exit 2
+      ;;
+  esac
+}
+
+# Parse pipeline parameter values from CLI args.
+# Supports --key=value and --key value, and treats --flag as true.
+extract_param_value() {
+  local default="$1"
+  shift
+  local value="${default}"
+  local i arg key next
+
+  for ((i=0; i<${#CLI_ARGS[@]}; i++)); do
+    arg="${CLI_ARGS[$i]}"
+    for key in "$@"; do
+      if [[ "${arg}" == "--${key}" ]]; then
+        if (( i + 1 < ${#CLI_ARGS[@]} )); then
+          next="${CLI_ARGS[$((i+1))]}"
+          if [[ "${next}" == --* ]]; then
+            value="true"
+          else
+            value="${next}"
+            i=$((i + 1))
+          fi
+        else
+          value="true"
+        fi
+        break
+      fi
+      if [[ "${arg}" == "--${key}="* ]]; then
+        value="${arg#*=}"
+        break
+      fi
+    done
+  done
+
+  printf '%s' "${value}"
+}
+
+canonicalize_cli_args() {
+  local -a normalized=()
+  local -a sorted=()
+  local i arg next line
+
+  for ((i=0; i<${#CLI_ARGS[@]}; i++)); do
+    arg="${CLI_ARGS[$i]}"
+    if [[ "${arg}" == --*=* ]]; then
+      normalized+=("${arg}")
+      continue
+    fi
+    if [[ "${arg}" == --* ]]; then
+      if (( i + 1 < ${#CLI_ARGS[@]} )) && [[ "${CLI_ARGS[$((i+1))]}" != --* ]]; then
+        normalized+=("${arg}=${CLI_ARGS[$((i+1))]}")
+        i=$((i + 1))
+      else
+        normalized+=("${arg}=true")
+      fi
+      continue
+    fi
+    normalized+=("ARG:${arg}")
+  done
+
+  if [[ ${#normalized[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  while IFS= read -r line; do
+    sorted+=("${line}")
+  done < <(printf '%s\n' "${normalized[@]}" | LC_ALL=C sort)
+
+  printf '%s\n' "${sorted[@]}"
+}
+
 mtime_utc() {
   local target="$1"
   if stat --version >/dev/null 2>&1; then
@@ -53,7 +171,7 @@ mtime_utc() {
   date -u -r "$(stat -f '%m' "${target}")" '+%Y-%m-%dT%H:%M:%SZ'
 }
 
-RUN_DIR="$(resolve_dir "${GREML_RUN_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}")"
+RUN_ROOT="$(resolve_dir "${GREML_RUN_DIR:-${SLURM_SUBMIT_DIR:-$PWD}}")"
 PROJECT_DIR="$(resolve_dir "${GREML_PROJECT_ROOT:-${SLURM_SUBMIT_DIR:-$PWD}}")"
 NF_DIR="${PROJECT_DIR}/nf"
 
@@ -102,38 +220,163 @@ if [[ ${#missing_diag[@]} -gt 0 ]]; then
 fi
 echo "prepare_phenotypes.R diagnostics preflight: OK (${#REQUIRED_PREP_DIAGNOSTICS[@]} markers)"
 
-# Keep this stable across reruns to preserve Nextflow resume/cache behavior.
-export NXF_WORK="${NXF_WORK:-/gpfs/scratch/sl8085/nextflow_work/greml_production}"
-mkdir -p "${RUN_DIR}/nextflow_logs" "${RUN_DIR}/results" "${NXF_WORK}"
+CLI_ARGS=("$@")
+
+expression_source="$(to_lower "$(extract_param_value "tmm" expression_source expression-source expressionSource)")"
+normalization_type="$(to_lower "$(extract_param_value "irnt" normalization_type normalization-type normalizationType)")"
+use_hm3_no_hla="$(normalize_bool "$(extract_param_value "true" use_hm3_no_hla use-hm3-no-hla useHm3NoHla)")"
+peer_nk="$(extract_param_value "auto" peer_nk peer-nk peerNk)"
+peer_max_genes="$(extract_param_value "0" peer_max_genes peer-max-genes peerMaxGenes)"
+n_pcs="$(extract_param_value "5" n_pcs n-pcs nPcs)"
+if [[ "${normalization_type}" == "ukb_irnt" ]]; then
+  normalization_type="irnt"
+fi
+if [[ "${normalization_type}" == "tmm_only" ]]; then
+  normalization_type="raw"
+fi
+if [[ "${use_hm3_no_hla}" == "true" ]]; then
+  snp_mode="hm3_no_mhc"
+else
+  snp_mode="all_snps"
+fi
+combo_label_default="$(sanitize_slug "${snp_mode}_${expression_source}_${normalization_type}_peer${peer_nk}_pmg${peer_max_genes}_npc${n_pcs}")"
+combo_hash_material="$(canonicalize_cli_args)"
+if [[ -z "${combo_hash_material}" ]]; then
+  combo_hash_material="<defaults>"
+fi
+combo_hash="$(sha256_text "${combo_hash_material}")"
+combo_hash_short="${combo_hash:0:12}"
+
+ISOLATE_BY_COMBO="${GREML_ISOLATE_BY_COMBO:-1}"
+if [[ "${ISOLATE_BY_COMBO}" == "0" ]]; then
+  RUN_DIR="${RUN_ROOT}"
+  RUN_KEY="shared_launchdir"
+else
+  if [[ "${ISOLATE_BY_COMBO}" != "1" ]]; then
+    echo "ERROR: GREML_ISOLATE_BY_COMBO must be 0 or 1 (got '${ISOLATE_BY_COMBO}')." >&2
+    exit 2
+  fi
+  combo_label="$(sanitize_slug "${GREML_COMBO_LABEL:-${combo_label_default}}")"
+  RUN_KEY="${combo_label}_${combo_hash_short}"
+  RUN_DIR="${RUN_ROOT}/runs/${RUN_KEY}"
+fi
+
+# Keep work/cache stable per RUN_KEY to preserve resume semantics while avoiding
+# cross-combo contention in a shared scratch root.
+NXF_WORK_ROOT="${NXF_WORK_ROOT:-/gpfs/scratch/sl8085/nextflow_work/greml_production}"
+export NXF_WORK="${NXF_WORK:-${NXF_WORK_ROOT}/${RUN_KEY}}"
+mkdir -p "${RUN_DIR}/.nextflow" "${RUN_DIR}/nextflow_logs" "${RUN_DIR}/results" "${NXF_WORK}"
 
 module load nextflow
 
 JOB_TAG="${SLURM_JOB_ID:-manual}"
 export NXF_LOG_FILE="${RUN_DIR}/nextflow_logs/nextflow_${JOB_TAG}.log"
 
+RESUME_FLAG="${GREML_RESUME:-1}"
+if [[ "${ISOLATE_BY_COMBO}" == "0" && "${RESUME_FLAG}" != "0" && "${GREML_ALLOW_SHARED_RESUME:-0}" != "1" ]]; then
+  echo "ERROR: GREML_ISOLATE_BY_COMBO=0 with resume enabled is unsafe and can trigger Nextflow LOCK collisions." >&2
+  echo "Set GREML_ISOLATE_BY_COMBO=1 (recommended), or GREML_RESUME=0 for a fresh non-resume run." >&2
+  exit 2
+fi
+
+# Serialize launches per RUN_DIR to prevent concurrent -resume collisions.
+LOCK_WAIT_SEC="${GREML_RUN_LOCK_WAIT_SEC:-0}"
+if ! [[ "${LOCK_WAIT_SEC}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR: GREML_RUN_LOCK_WAIT_SEC must be a non-negative integer (got '${LOCK_WAIT_SEC}')." >&2
+  exit 2
+fi
+
+LAUNCH_LOCK_FILE="${RUN_DIR}/.nextflow/.launch.lock"
+LOCK_ACQUIRED="0"
+LOCK_IMPL=""
+LOCK_DIR=""
+
+cleanup_launch_lock() {
+  if [[ "${LOCK_IMPL}" == "mkdir" && "${LOCK_ACQUIRED}" == "1" && -n "${LOCK_DIR}" ]]; then
+    rm -f "${LOCK_DIR}/owner.txt" 2>/dev/null || true
+    rmdir "${LOCK_DIR}" 2>/dev/null || true
+  fi
+}
+trap cleanup_launch_lock EXIT
+
+if command -v flock >/dev/null 2>&1; then
+  LOCK_IMPL="flock"
+  exec 9>"${LAUNCH_LOCK_FILE}"
+  if (( LOCK_WAIT_SEC > 0 )); then
+    flock -w "${LOCK_WAIT_SEC}" 9 || {
+      echo "ERROR: timed out waiting ${LOCK_WAIT_SEC}s for launch lock ${LAUNCH_LOCK_FILE}." >&2
+      exit 75
+    }
+  else
+    flock -n 9 || {
+      echo "ERROR: another launch is active for RUN_KEY=${RUN_KEY}; refusing concurrent start in ${RUN_DIR}." >&2
+      echo "Set GREML_RUN_LOCK_WAIT_SEC to wait instead of failing fast." >&2
+      exit 75
+    }
+  fi
+  LOCK_ACQUIRED="1"
+else
+  LOCK_IMPL="mkdir"
+  LOCK_DIR="${RUN_DIR}/.nextflow/.launch.lock.d"
+  START_EPOCH="$(date +%s)"
+  while true; do
+    if mkdir "${LOCK_DIR}" 2>/dev/null; then
+      LOCK_ACQUIRED="1"
+      {
+        echo "host=$(hostname)"
+        echo "pid=$$"
+        echo "run_key=${RUN_KEY}"
+        echo "started_utc=$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
+      } > "${LOCK_DIR}/owner.txt"
+      break
+    fi
+    if (( LOCK_WAIT_SEC == 0 )); then
+      echo "ERROR: another launch is active for RUN_KEY=${RUN_KEY}; refusing concurrent start in ${RUN_DIR}." >&2
+      echo "Set GREML_RUN_LOCK_WAIT_SEC to wait instead of failing fast." >&2
+      exit 75
+    fi
+    NOW_EPOCH="$(date +%s)"
+    if (( NOW_EPOCH - START_EPOCH >= LOCK_WAIT_SEC )); then
+      echo "ERROR: timed out waiting ${LOCK_WAIT_SEC}s for launch lock ${LOCK_DIR}." >&2
+      exit 75
+    fi
+    sleep 1
+  done
+fi
+
 cd "${RUN_DIR}"
 
 echo "Launching GREML workflow"
 echo "Submit dir  : ${SLURM_SUBMIT_DIR:-<unset>}"
 echo "Project dir : ${PROJECT_DIR}"
+echo "Run root    : ${RUN_ROOT}"
+echo "Run key     : ${RUN_KEY}"
+echo "Combo label : ${combo_label_default}"
+echo "Combo hash  : ${combo_hash_short}"
+echo "Isolation   : $([[ "${ISOLATE_BY_COMBO}" == "1" ]] && echo "enabled" || echo "disabled")"
 echo "Run dir     : ${RUN_DIR}"
 echo "Work dir    : ${NXF_WORK}"
 echo "Config file : ${NF_DIR}/nextflow.config"
+echo "Launch lock : ${LOCK_IMPL} (wait=${LOCK_WAIT_SEC}s)"
 
-RESUME_FLAG="${GREML_RESUME:-1}"
+NEXTFLOW_CMD=(
+  nextflow -log "${NXF_LOG_FILE}" run "${NF_DIR}/main.nf"
+  -c "${NF_DIR}/nextflow.config"
+  -profile slurm
+  -w "${NXF_WORK}"
+)
+
 if [[ "${RESUME_FLAG}" == "0" ]]; then
   echo "Resume mode : disabled (GREML_RESUME=0)"
-  nextflow -log "${NXF_LOG_FILE}" run "${NF_DIR}/main.nf" \
-    -c "${NF_DIR}/nextflow.config" \
-    -profile slurm \
-    -w "${NXF_WORK}" \
-    "$@"
 else
-  echo "Resume mode : enabled (-resume)"
-  nextflow -log "${NXF_LOG_FILE}" run "${NF_DIR}/main.nf" \
-    -c "${NF_DIR}/nextflow.config" \
-    -profile slurm \
-    -w "${NXF_WORK}" \
-    -resume \
-    "$@"
+  RESUME_SESSION="${GREML_RESUME_SESSION:-}"
+  if [[ -n "${RESUME_SESSION}" ]]; then
+    echo "Resume mode : enabled (-resume ${RESUME_SESSION})"
+    NEXTFLOW_CMD+=(-resume "${RESUME_SESSION}")
+  else
+    echo "Resume mode : enabled (-resume)"
+    NEXTFLOW_CMD+=(-resume)
+  fi
 fi
+
+"${NEXTFLOW_CMD[@]}" "$@"

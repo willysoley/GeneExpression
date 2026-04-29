@@ -34,6 +34,12 @@ From repository root:
 sbatch run_greml.sh
 ```
 
+Default launch behavior (important for Slurm sweep submissions):
+- `run_greml.sh` now isolates each parameter combo into its own launch dir:
+  `GREML_RUN_DIR/runs/<combo-label>_<combo-hash>/`
+- This avoids Nextflow session-history lock collisions on shared
+  `launchDir/.nextflow/history` when many `sbatch` jobs start together.
+
 Optional parameter overrides at submit-time:
 
 ```bash
@@ -47,8 +53,24 @@ sbatch --export=ALL,GREML_PROJECT_ROOT=/absolute/path/to/GeneExpression \
   /absolute/path/to/GeneExpression/run_greml.sh
 ```
 
+Set an explicit run root (recommended for organized sweeps):
+
+```bash
+sbatch --export=ALL,GREML_PROJECT_ROOT=/absolute/path/to/GeneExpression,GREML_RUN_DIR=/abs/path/greml_runs \
+  /absolute/path/to/GeneExpression/run_greml.sh --peer_nk 45
+```
+
+Optional compatibility mode (legacy shared launch dir, not recommended for high parallel submit):
+
+```bash
+sbatch --export=ALL,GREML_ISOLATE_BY_COMBO=0 run_greml.sh
+```
+
 ## Outputs
-Under `results/`:
+Under each isolated run directory:
+- `GREML_RUN_DIR/runs/<combo-label>_<combo-hash>/results/`
+
+Result files:
 - `data/final.phenotypes.tsv`
 - `data/final.qcovar`
 - `data/gene_index_map.txt`
@@ -58,6 +80,5 @@ Under `results/`:
 - `summary/final_heritability_summary.tsv`
 
 Logs:
-- `nextflow_logs/nextflow.log`
-- `nextflow_logs/nextflow_driver.out`
-- `nextflow_logs/nextflow_driver.err`
+- `nextflow_logs/nextflow_<slurm-jobid|manual>.log`
+- Slurm driver logs are written from `#SBATCH -o/-e` settings.
