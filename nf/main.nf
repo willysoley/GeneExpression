@@ -505,16 +505,37 @@ workflow {
     def bim_ch = Channel.value(file(bim_path))
     def fam_ch = Channel.value(file(fam_path))
 
-    FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
+    def reuseRunDir = normalizeMaybeQuotedEmpty(params.reuse_run_dir)
+    def reusePhenoDir = normalizeMaybeQuotedEmpty(params.reuse_pheno_dir)
+    def reuseGrmDir = normalizeMaybeQuotedEmpty(params.reuse_grm_dir)
+    if (reuseRunDir) {
+        def reuseRunPath = mustExist("reuse_run_dir", reuseRunDir)
+        if (!reusePhenoDir) {
+            reusePhenoDir = "${reuseRunPath}/results/data"
+        }
+        if (!reuseGrmDir) {
+            reuseGrmDir = "${reuseRunPath}/results/pca/${runLabel}"
+        }
+        log.info "Reuse mode: reuse_run_dir=${reuseRunPath}"
+    }
 
-    GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg, runLabel)
+    boolean reusePhenoEnabled = !!reusePhenoDir
+    boolean reuseGrmEnabled = !!reuseGrmDir
+    boolean fullReuseEnabled = reusePhenoEnabled && reuseGrmEnabled
 
-    def reusePhenoDir = params.reuse_pheno_dir?.toString()?.trim()
+    def grm_ch
     def pheno_ch
     def qcovar_ch
     def map_ch
 
-    if (reusePhenoDir) {
+    if (fullReuseEnabled) {
+        def reuseGrmPath = mustExist("reuse_grm_dir", reuseGrmDir)
+        mustExist("reused GRM file", "${reuseGrmPath}/genotype_grm.grm.bin")
+        mustExist("reused GRM file", "${reuseGrmPath}/genotype_grm.grm.N.bin")
+        mustExist("reused GRM file", "${reuseGrmPath}/genotype_grm.grm.id")
+        grm_ch = Channel.fromPath("${reuseGrmPath}/genotype_grm*", checkIfExists: true)
+        log.info "Reuse mode: reusing GRM files from ${reuseGrmPath}"
+
         def reuseDirPath = mustExist("reuse_pheno_dir", reusePhenoDir)
         def prefPheno = file("${reuseDirPath}/${params.phenotype_prefix}.phenotypes.tsv")
         def prefQcovar = file("${reuseDirPath}/${params.phenotype_prefix}.qcovar")
@@ -541,20 +562,55 @@ workflow {
         pheno_ch = Channel.value(file(reusedPheno))
         qcovar_ch = Channel.value(file(reusedQcovar))
         map_ch = Channel.value(file(reusedMap))
+        log.info "Reuse mode: skipping FILTER_EUROPEANS, GENERATE_PCA, PREPARE_PHENOTYPES"
     } else {
-        PREPARE_PHENOTYPES(
-            tpm_ch,
-            counts_ch,
-            FILTER_EUROPEANS.out.map_file,
-            GENERATE_PCA.out.eigenvec,
-            fam_ch,
-            params.peer_nk,
-            params.peer_max_genes,
-            params.phenotype_prefix
-        )
-        pheno_ch = PREPARE_PHENOTYPES.out.pheno
-        qcovar_ch = PREPARE_PHENOTYPES.out.qcovar
-        map_ch = PREPARE_PHENOTYPES.out.map
+        FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
+        GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg, runLabel)
+        grm_ch = GENERATE_PCA.out.grm
+
+        if (reusePhenoEnabled) {
+            def reuseDirPath = mustExist("reuse_pheno_dir", reusePhenoDir)
+            def prefPheno = file("${reuseDirPath}/${params.phenotype_prefix}.phenotypes.tsv")
+            def prefQcovar = file("${reuseDirPath}/${params.phenotype_prefix}.qcovar")
+            def prefMap = file("${reuseDirPath}/${params.phenotype_prefix}.gene_index_map.txt")
+
+            def reusedPheno
+            def reusedQcovar
+            def reusedMap
+
+            if (prefPheno.exists() && prefQcovar.exists() && prefMap.exists()) {
+                reusedPheno = mustExist("reused phenotype file", prefPheno.toString())
+                reusedQcovar = mustExist("reused qcovar file", prefQcovar.toString())
+                reusedMap = mustExist("reused gene index map", prefMap.toString())
+                log.info "Phenotype mode: reusing combo-specific files (${params.phenotype_prefix}) from ${reuseDirPath}"
+            } else {
+                def legacyPheno = mustExist("reused legacy phenotype file", "${reuseDirPath}/final.phenotypes.tsv")
+                def legacyQcovar = mustExist("reused legacy qcovar file", "${reuseDirPath}/final.qcovar")
+                def legacyMap = mustExist("reused legacy gene index map", "${reuseDirPath}/gene_index_map.txt")
+                reusedPheno = legacyPheno
+                reusedQcovar = legacyQcovar
+                reusedMap = legacyMap
+                log.info "Phenotype mode: combo-specific files not found; using legacy final.* files from ${reuseDirPath}"
+            }
+            pheno_ch = Channel.value(file(reusedPheno))
+            qcovar_ch = Channel.value(file(reusedQcovar))
+            map_ch = Channel.value(file(reusedMap))
+            log.info "Reuse mode: using reused phenotype files but regenerating GRM/PCA"
+        } else {
+            PREPARE_PHENOTYPES(
+                tpm_ch,
+                counts_ch,
+                FILTER_EUROPEANS.out.map_file,
+                GENERATE_PCA.out.eigenvec,
+                fam_ch,
+                params.peer_nk,
+                params.peer_max_genes,
+                params.phenotype_prefix
+            )
+            pheno_ch = PREPARE_PHENOTYPES.out.pheno
+            qcovar_ch = PREPARE_PHENOTYPES.out.qcovar
+            map_ch = PREPARE_PHENOTYPES.out.map
+        }
     }
 
     def gene_ch = map_ch
@@ -574,7 +630,7 @@ workflow {
         gene_ch,
         pheno_ch,
         qcovar_ch,
-        GENERATE_PCA.out.grm.collect()
+        grm_ch.collect()
     )
 
     def summaryFileCh = Channel.value(params.summary_filename)
