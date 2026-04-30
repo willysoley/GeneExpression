@@ -162,6 +162,22 @@ canonicalize_cli_args() {
   printf '%s\n' "${sorted[@]}"
 }
 
+split_csv_to_array() {
+  local csv="$1"
+  local -n out_arr="$2"
+  local item
+  local -a cleaned=()
+  out_arr=()
+  IFS=',' read -r -a out_arr <<< "${csv}"
+  for item in "${out_arr[@]}"; do
+    item="$(printf '%s' "${item}" | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+    if [[ -n "${item}" ]]; then
+      cleaned+=("${item}")
+    fi
+  done
+  out_arr=("${cleaned[@]}")
+}
+
 mtime_utc() {
   local target="$1"
   if stat --version >/dev/null 2>&1; then
@@ -221,6 +237,130 @@ fi
 echo "prepare_phenotypes.R diagnostics preflight: OK (${#REQUIRED_PREP_DIAGNOSTICS[@]} markers)"
 
 CLI_ARGS=("$@")
+
+FANOUT_CHILD="${GREML_FANOUT_CHILD:-0}"
+if [[ "${FANOUT_CHILD}" == "1" ]]; then
+  fanout_enabled="false"
+else
+  fanout_mode="$(to_lower "${GREML_FANOUT:-auto}")"
+  case "${fanout_mode}" in
+    auto)
+      if [[ ${#CLI_ARGS[@]} -eq 0 ]]; then
+        fanout_enabled="true"
+      else
+        fanout_enabled="false"
+      fi
+      ;;
+    1|true|t|yes|y|on)
+      fanout_enabled="true"
+      ;;
+    0|false|f|no|n|off)
+      fanout_enabled="false"
+      ;;
+    *)
+      echo "ERROR: GREML_FANOUT must be one of: auto,true,false,1,0 (got '${GREML_FANOUT}')." >&2
+      exit 2
+      ;;
+  esac
+fi
+
+if [[ "${fanout_enabled}" == "true" ]]; then
+  if ! command -v sbatch >/dev/null 2>&1; then
+    echo "ERROR: GREML_FANOUT is enabled but sbatch is not available in PATH." >&2
+    exit 2
+  fi
+
+  fanout_sleep_sec="${GREML_FANOUT_INTERVAL_SEC:-1}"
+  if ! [[ "${fanout_sleep_sec}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: GREML_FANOUT_INTERVAL_SEC must be a non-negative integer (got '${fanout_sleep_sec}')." >&2
+    exit 2
+  fi
+
+  fanout_snp_sets_raw="${GREML_FANOUT_SNP_SETS:-hm3_no_mhc,all_snps}"
+  fanout_expr_raw="${GREML_FANOUT_EXPRESSION_SOURCES:-tpm,tmm}"
+  fanout_norm_raw="${GREML_FANOUT_NORMALIZATION_TYPES:-irnt,inverse_normal,raw}"
+
+  split_csv_to_array "${fanout_snp_sets_raw}" fanout_snp_sets
+  split_csv_to_array "${fanout_expr_raw}" fanout_expr_sources
+  split_csv_to_array "${fanout_norm_raw}" fanout_norm_types
+
+  if [[ ${#fanout_snp_sets[@]} -eq 0 || ${#fanout_expr_sources[@]} -eq 0 || ${#fanout_norm_types[@]} -eq 0 ]]; then
+    echo "ERROR: One or more GREML_FANOUT_* lists were empty." >&2
+    exit 2
+  fi
+
+  mkdir -p "${RUN_ROOT}/nextflow_logs"
+  echo "Fanout mode: submitting matrix runs from one driver job"
+  echo "  SNP sets            : ${fanout_snp_sets[*]}"
+  echo "  Expression sources  : ${fanout_expr_sources[*]}"
+  echo "  Normalization types : ${fanout_norm_types[*]}"
+  echo "  Submit spacing      : ${fanout_sleep_sec}s"
+
+  submitted_n=0
+  for snp_item in "${fanout_snp_sets[@]}"; do
+    snp_item_norm="$(sanitize_slug "${snp_item}")"
+    case "${snp_item_norm}" in
+      hm3|hm3_no_mhc|hm3_no_hla|true|t|1|yes|y|on)
+        hm3_bool="true"
+        snp_label="hm3_no_mhc"
+        ;;
+      all|all_snps|false|f|0|no|n|off)
+        hm3_bool="false"
+        snp_label="all_snps"
+        ;;
+      *)
+        echo "ERROR: Unknown SNP set token in GREML_FANOUT_SNP_SETS: '${snp_item}'" >&2
+        echo "Allowed tokens include: hm3_no_mhc, all_snps" >&2
+        exit 2
+        ;;
+    esac
+
+    for expr_item in "${fanout_expr_sources[@]}"; do
+      expr_norm="$(to_lower "${expr_item}")"
+      if [[ "${expr_norm}" != "tpm" && "${expr_norm}" != "tmm" ]]; then
+        echo "ERROR: Invalid expression source in GREML_FANOUT_EXPRESSION_SOURCES: '${expr_item}'" >&2
+        exit 2
+      fi
+
+      for norm_item in "${fanout_norm_types[@]}"; do
+        norm_norm="$(to_lower "${norm_item}")"
+        case "${norm_norm}" in
+          irnt|inverse_normal|raw) ;;
+          ukb_irnt) norm_norm="irnt" ;;
+          tmm_only) norm_norm="raw" ;;
+          *)
+            echo "ERROR: Invalid normalization type in GREML_FANOUT_NORMALIZATION_TYPES: '${norm_item}'" >&2
+            exit 2
+            ;;
+        esac
+
+        combo_label="$(sanitize_slug "${snp_label}_${expr_norm}_${norm_norm}")"
+        child_cmd=(
+          sbatch
+          --job-name "GREML_${combo_label}"
+          --output "${RUN_ROOT}/nextflow_logs/nextflow_driver-${combo_label}-%j.out"
+          --error "${RUN_ROOT}/nextflow_logs/nextflow_driver-${combo_label}-%j.err"
+          --export "ALL,GREML_FANOUT=0,GREML_FANOUT_CHILD=1,GREML_COMBO_LABEL=${combo_label}"
+          "${PROJECT_DIR}/run_greml.sh"
+          "${CLI_ARGS[@]}"
+          --use_hm3_no_hla "${hm3_bool}"
+          --expression_source "${expr_norm}"
+          --normalization_type "${norm_norm}"
+        )
+        submit_out="$("${child_cmd[@]}")"
+        submitted_n=$((submitted_n + 1))
+        echo "[fanout:${submitted_n}] ${combo_label} -> ${submit_out}"
+
+        if (( fanout_sleep_sec > 0 )); then
+          sleep "${fanout_sleep_sec}"
+        fi
+      done
+    done
+  done
+
+  echo "Fanout submission complete: ${submitted_n} jobs."
+  exit 0
+fi
 
 expression_source="$(to_lower "$(extract_param_value "tmm" expression_source expression-source expressionSource)")"
 normalization_type="$(to_lower "$(extract_param_value "irnt" normalization_type normalization-type normalizationType)")"
