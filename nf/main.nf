@@ -242,8 +242,9 @@ process PREPARE_PHENOTYPES {
 
 process ESTIMATE_HERITABILITY {
     tag "${gene_name}"
-    errorStrategy 'ignore'
-    maxRetries 0
+    errorStrategy { task.exitStatus in [104, 130, 134, 137, 139, 140, 143, 247, 271] ? 'retry' : 'ignore' }
+    maxRetries 2
+    publishDir "${params.outdir}/diagnostics/heritability", mode: 'copy'
 
     input:
     tuple val(gene_name), val(idx)
@@ -253,18 +254,56 @@ process ESTIMATE_HERITABILITY {
 
     output:
     path "${gene_name}.stats", emit: stats
+    path "${gene_name}.diagnostics.tsv", emit: diagnostics
+    path "${gene_name}_*.gcta.log", emit: gcta_logs, optional: true
 
     script:
     // GRM files are staged via `grm_files`; GCTA reads them by this fixed basename.
     def grmPrefix = "genotype_grm"
     """
-    ${params.gcta_path} --grm ${grmPrefix} \
-        --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
-        --reml --out ${gene_name}_greml --thread-num 1 || echo "GREML_FAIL"
+    set -uo pipefail
+
+    stats_file="${gene_name}.stats"
+    diag_file="${gene_name}.diagnostics.tsv"
+    greml_log="${gene_name}_greml.gcta.log"
+    he_log="${gene_name}_he.gcta.log"
+
+    # Seed outputs early so interrupted tasks still leave breadcrumbs for debugging.
+    echo -e "${gene_name}\\tFAIL\\t${idx}\\tNA\\tNA\\tNA\\tNA\\tNA" > "\${stats_file}"
+    {
+      echo -e "key\\tvalue"
+      echo -e "gene\\t${gene_name}"
+      echo -e "index\\t${idx}"
+      echo -e "start_utc\\t\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      echo -e "workdir\\t\${PWD}"
+      echo -e "grm_prefix\\t${grmPrefix}"
+      echo -e "pheno_file\\t${pheno}"
+      echo -e "qcovar_file\\t${qcovar}"
+    } > "\${diag_file}"
+
+    on_term() {
+      local sig="\$1"
+      {
+        echo -e "terminated_signal\\t\${sig}"
+        echo -e "terminated_utc\\t\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+      } >> "\${diag_file}"
+      echo -e "${gene_name}\\tFAIL\\t${idx}\\tNA\\tNA\\tNA\\tNA\\tNA" > "\${stats_file}"
+      exit 0
+    }
+    trap 'on_term TERM' TERM
+    trap 'on_term INT' INT
 
     ${params.gcta_path} --grm ${grmPrefix} \
         --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
-        --HEreg --out ${gene_name}_he --thread-num 1 || echo "HE_FAIL"
+        --reml --out ${gene_name}_greml --thread-num 1 \
+        > "\${greml_log}" 2>&1
+    greml_rc=\$?
+
+    ${params.gcta_path} --grm ${grmPrefix} \
+        --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
+        --HEreg --out ${gene_name}_he --thread-num 1 \
+        > "\${he_log}" 2>&1
+    he_rc=\$?
 
     if [ -f "${gene_name}_greml.hsq" ]; then
         h2_reml=\$(grep "V(G)/Vp" ${gene_name}_greml.hsq | awk '{print \$2}')
@@ -282,7 +321,19 @@ process ESTIMATE_HERITABILITY {
         h2_he="NA"; se_he="NA"
     fi
 
-    echo -e "${gene_name}\\t\${status}\\t${idx}\\t\${h2_reml}\\t\${se_reml}\\t\${pval_reml}\\t\${h2_he}\\t\${se_he}" > ${gene_name}.stats
+    if [ "\${greml_rc}" -ne 0 ] || [ "\${he_rc}" -ne 0 ]; then
+      status="FAIL"
+    fi
+
+    {
+      echo -e "greml_rc\\t\${greml_rc}"
+      echo -e "he_rc\\t\${he_rc}"
+      echo -e "greml_hsq_exists\\t\$([ -s ${gene_name}_greml.hsq ] && echo 1 || echo 0)"
+      echo -e "he_heri_exists\\t\$([ -s ${gene_name}_he.heri ] && echo 1 || echo 0)"
+      echo -e "end_utc\\t\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    } >> "\${diag_file}"
+
+    echo -e "${gene_name}\\t\${status}\\t${idx}\\t\${h2_reml}\\t\${se_reml}\\t\${pval_reml}\\t\${h2_he}\\t\${se_he}" > "\${stats_file}"
     """
 }
 
@@ -294,12 +345,18 @@ process SUMMARIZE_RESULTS {
     val summary_file
 
     output:
-    path "${summary_file}", emit: summary
+    path "*.tsv", emit: summary, arity: '1'
 
     script:
     """
-    echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > ${summary_file}
-    cat *.stats >> ${summary_file}
+    summary_file_resolved="${summary_file}"
+    if [[ -z "\${summary_file_resolved}" ]]; then
+      summary_file_resolved="final_heritability_summary.tsv"
+      echo "WARN: summary_file was empty; using fallback=\${summary_file_resolved}" >&2
+    fi
+    echo -e "Gene\\tStatus\\tIndex\\th2_GREML\\tSE_GREML\\tPval_GREML\\th2_HE\\tSE_HE" > "\${summary_file_resolved}"
+    cat *.stats >> "\${summary_file_resolved}"
+    test -s "\${summary_file_resolved}"
     """
 }
 
