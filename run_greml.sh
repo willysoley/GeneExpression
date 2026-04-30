@@ -19,7 +19,7 @@ set -euo pipefail
 #   GREML_RUN_DIR=/abs/path/for/results_and-logs
 # Behavior:
 #   by default each parameter combination gets its own launch dir under:
-#     ${GREML_RUN_DIR}/runs/<combo-label>_<combo-hash>
+#     ${GREML_RUN_DIR}/runs/<combo-label>
 #   set GREML_ISOLATE_BY_COMBO=0 to keep legacy shared launch dir behavior
 resolve_dir() {
   local dir="$1"
@@ -340,7 +340,7 @@ if [[ "${fanout_enabled}" == "true" ]]; then
           --job-name "GREML_${combo_label}"
           --output "${RUN_ROOT}/nextflow_logs/nextflow_driver-${combo_label}-%j.out"
           --error "${RUN_ROOT}/nextflow_logs/nextflow_driver-${combo_label}-%j.err"
-          --export "ALL,GREML_FANOUT=0,GREML_FANOUT_CHILD=1,GREML_COMBO_LABEL=${combo_label}"
+          --export "ALL,GREML_FANOUT=0,GREML_FANOUT_CHILD=1"
           "${PROJECT_DIR}/run_greml.sh"
           "${CLI_ARGS[@]}"
           --use_hm3_no_hla "${hm3_bool}"
@@ -397,7 +397,7 @@ else
     exit 2
   fi
   combo_label="$(sanitize_slug "${GREML_COMBO_LABEL:-${combo_label_default}}")"
-  RUN_KEY="${combo_label}_${combo_hash_short}"
+  RUN_KEY="${combo_label}"
   RUN_DIR="${RUN_ROOT}/runs/${RUN_KEY}"
 fi
 
