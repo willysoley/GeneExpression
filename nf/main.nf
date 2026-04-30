@@ -528,6 +528,53 @@ workflow {
     def pheno_ch
     def qcovar_ch
     def map_ch
+    def resolveReusedPhenoTriplet = { String reuseDirPath ->
+        def candidatePrefixes = [resolvedPhenoPrefix, "pheno_${runLabel}"]
+            .collect { normalizeMaybeQuotedEmpty(it) }
+            .findAll { it }
+            .unique(false)
+
+        for (prefix in candidatePrefixes) {
+            def phenoPath = "${reuseDirPath}/${prefix}.phenotypes.tsv"
+            def qcovarPath = "${reuseDirPath}/${prefix}.qcovar"
+            def mapPath = "${reuseDirPath}/${prefix}.gene_index_map.txt"
+            if (file(phenoPath).exists() && file(qcovarPath).exists() && file(mapPath).exists()) {
+                return [
+                    pheno: mustExist("reused phenotype file", phenoPath),
+                    qcovar: mustExist("reused qcovar file", qcovarPath),
+                    map: mustExist("reused gene index map", mapPath),
+                    mode: "prefix:${prefix}"
+                ]
+            }
+        }
+
+        def autoCandidates = new File(reuseDirPath)
+            .listFiles()
+            ?.findAll { it.name.endsWith(".phenotypes.tsv") }
+            ?.collect { it.name.replaceFirst(/\.phenotypes\.tsv$/, "") }
+            ?.sort() ?: []
+        for (prefix in autoCandidates) {
+            def phenoPath = "${reuseDirPath}/${prefix}.phenotypes.tsv"
+            def qcovarPath = "${reuseDirPath}/${prefix}.qcovar"
+            def mapPath = "${reuseDirPath}/${prefix}.gene_index_map.txt"
+            if (file(qcovarPath).exists() && file(mapPath).exists()) {
+                return [
+                    pheno: mustExist("reused phenotype file", phenoPath),
+                    qcovar: mustExist("reused qcovar file", qcovarPath),
+                    map: mustExist("reused gene index map", mapPath),
+                    mode: "auto:${prefix}"
+                ]
+            }
+        }
+
+        log.warn "Reuse phenotype lookup failed in ${reuseDirPath}; tried prefixes=${candidatePrefixes} and auto-candidates=${autoCandidates}."
+        return [
+            pheno: mustExist("reused legacy phenotype file", "${reuseDirPath}/final.phenotypes.tsv"),
+            qcovar: mustExist("reused legacy qcovar file", "${reuseDirPath}/final.qcovar"),
+            map: mustExist("reused legacy gene index map", "${reuseDirPath}/gene_index_map.txt"),
+            mode: "legacy:final.*"
+        ]
+    }
 
     if (fullReuseEnabled) {
         def reuseGrmPath = mustExist("reuse_grm_dir", reuseGrmDir)
@@ -538,31 +585,11 @@ workflow {
         log.info "Reuse mode: reusing GRM files from ${reuseGrmPath}"
 
         def reuseDirPath = mustExist("reuse_pheno_dir", reusePhenoDir)
-        def prefPheno = file("${reuseDirPath}/${resolvedPhenoPrefix}.phenotypes.tsv")
-        def prefQcovar = file("${reuseDirPath}/${resolvedPhenoPrefix}.qcovar")
-        def prefMap = file("${reuseDirPath}/${resolvedPhenoPrefix}.gene_index_map.txt")
-
-        def reusedPheno
-        def reusedQcovar
-        def reusedMap
-
-        if (prefPheno.exists() && prefQcovar.exists() && prefMap.exists()) {
-            reusedPheno = mustExist("reused phenotype file", prefPheno.toString())
-            reusedQcovar = mustExist("reused qcovar file", prefQcovar.toString())
-            reusedMap = mustExist("reused gene index map", prefMap.toString())
-            log.info "Phenotype mode: reusing combo-specific files (${resolvedPhenoPrefix}) from ${reuseDirPath}"
-        } else {
-            def legacyPheno = mustExist("reused legacy phenotype file", "${reuseDirPath}/final.phenotypes.tsv")
-            def legacyQcovar = mustExist("reused legacy qcovar file", "${reuseDirPath}/final.qcovar")
-            def legacyMap = mustExist("reused legacy gene index map", "${reuseDirPath}/gene_index_map.txt")
-            reusedPheno = legacyPheno
-            reusedQcovar = legacyQcovar
-            reusedMap = legacyMap
-            log.info "Phenotype mode: combo-specific files not found; using legacy final.* files from ${reuseDirPath}"
-        }
-        pheno_ch = Channel.value(file(reusedPheno))
-        qcovar_ch = Channel.value(file(reusedQcovar))
-        map_ch = Channel.value(file(reusedMap))
+        def reused = resolveReusedPhenoTriplet(reuseDirPath)
+        pheno_ch = Channel.value(file(reused.pheno))
+        qcovar_ch = Channel.value(file(reused.qcovar))
+        map_ch = Channel.value(file(reused.map))
+        log.info "Phenotype mode: reusing files via ${reused.mode} from ${reuseDirPath}"
         log.info "Reuse mode: skipping FILTER_EUROPEANS, GENERATE_PCA, PREPARE_PHENOTYPES"
     } else {
         FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
@@ -571,31 +598,11 @@ workflow {
 
         if (reusePhenoEnabled) {
             def reuseDirPath = mustExist("reuse_pheno_dir", reusePhenoDir)
-            def prefPheno = file("${reuseDirPath}/${resolvedPhenoPrefix}.phenotypes.tsv")
-            def prefQcovar = file("${reuseDirPath}/${resolvedPhenoPrefix}.qcovar")
-            def prefMap = file("${reuseDirPath}/${resolvedPhenoPrefix}.gene_index_map.txt")
-
-            def reusedPheno
-            def reusedQcovar
-            def reusedMap
-
-            if (prefPheno.exists() && prefQcovar.exists() && prefMap.exists()) {
-                reusedPheno = mustExist("reused phenotype file", prefPheno.toString())
-                reusedQcovar = mustExist("reused qcovar file", prefQcovar.toString())
-                reusedMap = mustExist("reused gene index map", prefMap.toString())
-                log.info "Phenotype mode: reusing combo-specific files (${resolvedPhenoPrefix}) from ${reuseDirPath}"
-            } else {
-                def legacyPheno = mustExist("reused legacy phenotype file", "${reuseDirPath}/final.phenotypes.tsv")
-                def legacyQcovar = mustExist("reused legacy qcovar file", "${reuseDirPath}/final.qcovar")
-                def legacyMap = mustExist("reused legacy gene index map", "${reuseDirPath}/gene_index_map.txt")
-                reusedPheno = legacyPheno
-                reusedQcovar = legacyQcovar
-                reusedMap = legacyMap
-                log.info "Phenotype mode: combo-specific files not found; using legacy final.* files from ${reuseDirPath}"
-            }
-            pheno_ch = Channel.value(file(reusedPheno))
-            qcovar_ch = Channel.value(file(reusedQcovar))
-            map_ch = Channel.value(file(reusedMap))
+            def reused = resolveReusedPhenoTriplet(reuseDirPath)
+            pheno_ch = Channel.value(file(reused.pheno))
+            qcovar_ch = Channel.value(file(reused.qcovar))
+            map_ch = Channel.value(file(reused.map))
+            log.info "Phenotype mode: reusing files via ${reused.mode} from ${reuseDirPath}"
             log.info "Reuse mode: using reused phenotype files but regenerating GRM/PCA"
         } else {
             PREPARE_PHENOTYPES(
