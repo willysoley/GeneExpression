@@ -244,7 +244,6 @@ process ESTIMATE_HERITABILITY {
     tag "${gene_name}"
     errorStrategy { task.exitStatus in [104, 130, 134, 137, 139, 140, 143, 247, 271] ? 'retry' : 'terminate' }
     maxRetries 2
-    publishDir "${params.outdir}/diagnostics/heritability", mode: 'copy'
 
     input:
     tuple val(gene_name), val(idx)
@@ -254,8 +253,6 @@ process ESTIMATE_HERITABILITY {
 
     output:
     path "${gene_name}.stats", emit: stats
-    path "${gene_name}.diagnostics.tsv", emit: diagnostics
-    path "${gene_name}_*.gcta.log", emit: gcta_logs, optional: true
 
     script:
     // GRM files are staged via `grm_files`; GCTA reads them by this fixed basename.
