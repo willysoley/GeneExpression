@@ -270,7 +270,7 @@ if [[ "${fanout_enabled}" == "true" ]]; then
     exit 2
   fi
 
-  fanout_sleep_sec="${GREML_FANOUT_INTERVAL_SEC:-1}"
+  fanout_sleep_sec="${GREML_FANOUT_INTERVAL_SEC:-0}"
   if ! [[ "${fanout_sleep_sec}" =~ ^[0-9]+$ ]]; then
     echo "ERROR: GREML_FANOUT_INTERVAL_SEC must be a non-negative integer (got '${fanout_sleep_sec}')." >&2
     exit 2
