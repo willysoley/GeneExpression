@@ -242,7 +242,7 @@ process PREPARE_PHENOTYPES {
 
 process ESTIMATE_HERITABILITY {
     tag "${gene_name}"
-    errorStrategy { task.exitStatus in [104, 130, 134, 137, 139, 140, 143, 247, 271] ? 'retry' : 'ignore' }
+    errorStrategy { task.exitStatus in [104, 130, 134, 137, 139, 140, 143, 247, 271] ? 'retry' : 'terminate' }
     maxRetries 2
     publishDir "${params.outdir}/diagnostics/heritability", mode: 'copy'
 
@@ -260,8 +260,12 @@ process ESTIMATE_HERITABILITY {
     script:
     // GRM files are staged via `grm_files`; GCTA reads them by this fixed basename.
     def grmPrefix = "genotype_grm"
+    def heEnabled = params.run_he ? "1" : "0"
     """
-    set -uo pipefail
+    # Nextflow wrappers may run bash with -e/-u. For this process we want
+    # per-gene soft-fail behavior, so disable strict exit modes explicitly.
+    set +e +u
+    set +o pipefail
 
     stats_file="${gene_name}.stats"
     diag_file="${gene_name}.diagnostics.tsv"
@@ -293,17 +297,30 @@ process ESTIMATE_HERITABILITY {
     trap 'on_term TERM' TERM
     trap 'on_term INT' INT
 
-    ${params.gcta_path} --grm ${grmPrefix} \
+    greml_rc=99
+    if ${params.gcta_path} --grm ${grmPrefix} \
         --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
         --reml --out ${gene_name}_greml --thread-num 1 \
-        > "\${greml_log}" 2>&1
-    greml_rc=\$?
+        > "\${greml_log}" 2>&1; then
+      greml_rc=0
+    else
+      greml_rc=\$?
+    fi
 
-    ${params.gcta_path} --grm ${grmPrefix} \
-        --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
-        --HEreg --out ${gene_name}_he --thread-num 1 \
-        > "\${he_log}" 2>&1
-    he_rc=\$?
+    he_enabled="${heEnabled}"
+    he_rc=0
+    if [ "\${he_enabled}" = "1" ]; then
+      if ${params.gcta_path} --grm ${grmPrefix} \
+          --pheno ${pheno} --mpheno ${idx} --qcovar ${qcovar} \
+          --HEreg --out ${gene_name}_he --thread-num 1 \
+          > "\${he_log}" 2>&1; then
+        he_rc=0
+      else
+        he_rc=\$?
+      fi
+    else
+      printf 'HEreg skipped (params.run_he=false)\n' > "\${he_log}"
+    fi
 
     if [ -f "${gene_name}_greml.hsq" ]; then
         h2_reml=\$(grep "V(G)/Vp" ${gene_name}_greml.hsq | awk '{print \$2}')
@@ -314,26 +331,36 @@ process ESTIMATE_HERITABILITY {
         h2_reml="NA"; se_reml="NA"; pval_reml="NA"; status="FAIL"
     fi
 
-    if [ -f "${gene_name}_he.heri" ]; then
+    if [ "\${he_enabled}" = "1" ] && [ -f "${gene_name}_he.heri" ]; then
         h2_he=\$(grep "V(G)/Vp" ${gene_name}_he.heri | awk '{print \$2}')
         se_he=\$(grep "V(G)/Vp" ${gene_name}_he.heri | awk '{print \$3}')
     else
         h2_he="NA"; se_he="NA"
     fi
 
-    if [ "\${greml_rc}" -ne 0 ] || [ "\${he_rc}" -ne 0 ]; then
+    if [ "\${greml_rc}" != "0" ] || { [ "\${he_enabled}" = "1" ] && [ "\${he_rc}" != "0" ]; }; then
       status="FAIL"
     fi
 
     {
+      echo -e "he_enabled\\t\${he_enabled}"
       echo -e "greml_rc\\t\${greml_rc}"
       echo -e "he_rc\\t\${he_rc}"
       echo -e "greml_hsq_exists\\t\$([ -s ${gene_name}_greml.hsq ] && echo 1 || echo 0)"
       echo -e "he_heri_exists\\t\$([ -s ${gene_name}_he.heri ] && echo 1 || echo 0)"
+      if [ -s "\${greml_log}" ]; then
+        last_line=\$(tail -n 1 "\${greml_log}" | tr '\\t' ' ' | tr -d '\\r')
+        echo -e "greml_log_last\\t\${last_line}"
+      fi
+      if [ -s "\${he_log}" ]; then
+        last_line=\$(tail -n 1 "\${he_log}" | tr '\\t' ' ' | tr -d '\\r')
+        echo -e "he_log_last\\t\${last_line}"
+      fi
       echo -e "end_utc\\t\$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     } >> "\${diag_file}"
 
     echo -e "${gene_name}\\t\${status}\\t${idx}\\t\${h2_reml}\\t\${se_reml}\\t\${pval_reml}\\t\${h2_he}\\t\${se_he}" > "\${stats_file}"
+    exit 0
     """
 }
 
@@ -387,6 +414,7 @@ workflow {
     params.tpm_file = mustExist("tpm_file", params.tpm_file)
     params.counts_file = mustExist("counts_file", params.counts_file)
     params.use_hm3_no_hla = params.use_hm3_no_hla in [true, "true", "TRUE", "1", 1]
+    params.run_he = params.run_he in [true, "true", "TRUE", "1", 1]
     params.expression_source = (params.expression_source ?: "tmm").toString().trim().toLowerCase()
     def allowedExpressionSource = ["tmm", "tpm"]
     if (!allowedExpressionSource.contains(params.expression_source)) {
@@ -407,6 +435,7 @@ workflow {
     }
     log.info "Phenotype expression_source=${params.expression_source}"
     log.info "Phenotype normalization_type=${params.normalization_type}"
+    log.info "Haseman-Elston regression run_he=${params.run_he}"
     log.info "Phenotype peer_max_genes=${params.peer_max_genes}"
     def snpSetLabel = params.use_hm3_no_hla ? "hm3_no_mhc" : "all_snps"
     def runLabel = "${snpSetLabel}_${params.expression_source}_${params.normalization_type}"
@@ -530,7 +559,16 @@ workflow {
 
     def gene_ch = map_ch
         .splitCsv(sep: '\t', header: true)
-        .map { row -> tuple(row.gene_name, row.mpheno_index) }
+        .map { row ->
+            def gene = (row.gene_name ?: '').toString().trim()
+            def idx = (row.mpheno_index ?: '').toString().trim()
+            if (!gene || !(idx ==~ /\d+/)) {
+                log.warn "Skipping invalid gene_index row: gene_name='${row.gene_name}' mpheno_index='${row.mpheno_index}'"
+                return null
+            }
+            tuple(gene, idx)
+        }
+        .filter { it != null }
 
     ESTIMATE_HERITABILITY(
         gene_ch,
