@@ -157,23 +157,19 @@ plot_df <- all_results %>%
 plot_stats <- plot_df %>%
   group_by(analysis_type, snp_set) %>%
   summarise(
-    q1 = quantile(h2_GREML, 0.25, na.rm = TRUE),
     mean_h2 = mean(h2_GREML, na.rm = TRUE),
     median_h2 = median(h2_GREML, na.rm = TRUE),
-    q3 = quantile(h2_GREML, 0.75, na.rm = TRUE),
     .groups = "drop"
   )
 
 x_min <- min(plot_df$h2_GREML, na.rm = TRUE)
-x_max <- max(plot_df$h2_GREML, na.rm = TRUE)
-x_span <- max(x_max - x_min, 1e-6)
+x_left <- min(0, floor(x_min * 10) / 10)
 
 plot_stats <- plot_stats %>%
   mutate(
-    label_x = x_max + (0.25 * x_span),
     label = sprintf(
-      "Q1=%.3f | Mean=%.3f | Median=%.3f | Q3=%.3f",
-      q1, mean_h2, median_h2, q3
+      "Mean=%.3f | Median=%.3f",
+      mean_h2, median_h2
     )
   )
 
@@ -193,18 +189,19 @@ p <- plot_df %>%
   ) +
   geom_text(
     data = plot_stats,
-    aes(x = label_x, y = analysis_type, label = label),
+    aes(x = median_h2, y = analysis_type, label = label),
     inherit.aes = FALSE,
-    hjust = 0,
-    size = 3
+    nudge_y = 0.27,
+    vjust = 0,
+    size = 2.6
   ) +
   coord_cartesian(
-    xlim = c(x_min, x_max + (0.9 * x_span)),
+    xlim = c(x_left, 1),
     clip = "off"
   ) +
   labs(
     title = "GREML h2 by analysis setting",
-    subtitle = "PASS genes only (white diamond = mean; right text = Q1/Mean/Median/Q3)",
+    subtitle = "PASS genes only (white diamond = mean; text above box = mean/median)",
     x = "GREML h2 estimate",
     y = "SNP set | expression method | normalization",
     fill = "SNP set"
@@ -213,7 +210,7 @@ p <- plot_df %>%
   theme(
     legend.position = "top",
     panel.grid.minor = element_blank(),
-    plot.margin = margin(5.5, 300, 5.5, 5.5)
+    plot.margin = margin(14, 18, 6, 6)
   )
 
 print(p)
@@ -221,7 +218,7 @@ print(p)
 ggsave(
   filename = file.path(base_dir, "greml_h2_boxplot_by_setting.png"),
   plot = p,
-  width = 18,
+  width = 12,
   height = 7,
   dpi = 300
 )
