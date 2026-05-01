@@ -158,7 +158,6 @@ plot_stats <- plot_df %>%
   group_by(analysis_type, snp_set) %>%
   summarise(
     mean_h2 = mean(h2_GREML, na.rm = TRUE),
-    median_h2 = median(h2_GREML, na.rm = TRUE),
     .groups = "drop"
   )
 
@@ -167,10 +166,7 @@ x_left <- min(0, floor(x_min * 10) / 10)
 
 plot_stats <- plot_stats %>%
   mutate(
-    label = sprintf(
-      "Mean=%.3f | Median=%.3f",
-      mean_h2, median_h2
-    )
+    label = sprintf("Mean=%.3f", mean_h2)
   )
 
 p <- plot_df %>%
@@ -189,7 +185,7 @@ p <- plot_df %>%
   ) +
   geom_text(
     data = plot_stats,
-    aes(x = median_h2, y = analysis_type, label = label),
+    aes(x = mean_h2, y = analysis_type, label = label),
     inherit.aes = FALSE,
     nudge_y = 0.27,
     vjust = 0,
@@ -201,7 +197,7 @@ p <- plot_df %>%
   ) +
   labs(
     title = "GREML h2 by analysis setting",
-    subtitle = "PASS genes only (white diamond = mean; text above box = mean/median)",
+    subtitle = "PASS genes only (white diamond and text label = mean)",
     x = "GREML h2 estimate",
     y = "SNP set | expression method | normalization",
     fill = "SNP set"
