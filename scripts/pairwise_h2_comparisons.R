@@ -139,28 +139,60 @@ if (nrow(pair_df) == 0) stop("No rows left after filtering.")
 # 4) Grouped section plots
 # -----------------------------
 calc_stats <- function(df) {
-  df %>%
+  base_stats <- df %>%
     group_by(facet_label) %>%
     summarise(
       n = n(),
       r = cor(x_plot, y_plot, use = "complete.obs"),
-      slope = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[2], NA_real_),
-      intercept = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[1], NA_real_),
+      n_x_nonzero_y_zero = sum(x_plot != 0 & y_plot == 0, na.rm = TRUE),
+      n_x_zero_y_nonzero = sum(x_plot == 0 & y_plot != 0, na.rm = TRUE),
+      n_fit_all = n(),
+      slope_all = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[2], NA_real_),
+      intercept_all = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[1], NA_real_),
       .groups = "drop"
-    ) %>%
+    )
+
+  fit_stats <- df %>%
+    filter(!(x_plot != 0 & y_plot == 0), !(x_plot == 0 & y_plot != 0)) %>%
+    group_by(facet_label) %>%
+    summarise(
+      n_fit_no_conv = n(),
+      slope_no_conv = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[2], NA_real_),
+      intercept_no_conv = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[1], NA_real_),
+      .groups = "drop"
+    )
+
+  base_stats %>%
+    left_join(fit_stats, by = "facet_label") %>%
     mutate(
-      slope_flag = case_when(
-        is.na(slope) ~ "m=NA",
-        abs(slope - 1) < 0.05 ~ "m≈1",
-        slope > 1 ~ "m>1",
+      slope_flag_all = case_when(
+        is.na(slope_all) ~ "m=NA",
+        abs(slope_all - 1) < 0.05 ~ "m≈1",
+        slope_all > 1 ~ "m>1",
         TRUE ~ "m<1"
       ),
-      eq_label = if_else(
-        is.na(slope) | is.na(intercept),
-        "y = NA",
-        sprintf("y = %.3fx %+.3f", slope, intercept)
+      slope_flag_no_conv = case_when(
+        is.na(slope_no_conv) ~ "m=NA",
+        abs(slope_no_conv - 1) < 0.05 ~ "m≈1",
+        slope_no_conv > 1 ~ "m>1",
+        TRUE ~ "m<1"
       ),
-      lbl_top = sprintf("n=%d, r=%.2f\n%s (%s)", n, r, eq_label, slope_flag)
+      eq_all = if_else(
+        is.na(slope_all) | is.na(intercept_all),
+        "y = NA",
+        sprintf("y = %.3fx %+.3f", slope_all, intercept_all)
+      ),
+      eq_no_conv = if_else(
+        is.na(slope_no_conv) | is.na(intercept_no_conv),
+        "y = NA",
+        sprintf("y = %.3fx %+.3f", slope_no_conv, intercept_no_conv)
+      ),
+      lbl_top = sprintf(
+        "n=%d, r=%.2f\nall: %s (%s)\nno-conv (n=%d): %s (%s)\nX!=0,Y=0: %d | X=0,Y!=0: %d",
+        n, r, eq_all, slope_flag_all,
+        coalesce(n_fit_no_conv, 0L), eq_no_conv, slope_flag_no_conv,
+        n_x_nonzero_y_zero, n_x_zero_y_nonzero
+      )
     )
 }
 
@@ -231,6 +263,7 @@ norm_df <- pair_df %>%
 
 prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
 out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
+out_zero_types <- file.path(runs_dir, paste0("pairwise_h2_zero_mismatch_types_", prefix, ".tsv"))
 
 stats_all <- bind_rows(
   calc_stats(snp_df) %>% mutate(section = "SNP set: ALL vs HM3"),
@@ -238,6 +271,22 @@ stats_all <- bind_rows(
   calc_stats(norm_df) %>% mutate(section = "Normalization: RAW vs IRNT")
 )
 write_tsv(stats_all, out_stats)
+
+zero_type_counts <- stats_all %>%
+  select(section, facet_label, n_x_nonzero_y_zero, n_x_zero_y_nonzero) %>%
+  pivot_longer(
+    cols = c(n_x_nonzero_y_zero, n_x_zero_y_nonzero),
+    names_to = "type",
+    values_to = "n_genes"
+  ) %>%
+  mutate(
+    type = recode(
+      type,
+      n_x_nonzero_y_zero = "X_nonzero_Y_zero",
+      n_x_zero_y_nonzero = "X_zero_Y_nonzero"
+    )
+  )
+write_tsv(zero_type_counts, out_zero_types)
 
 plot_section(
   snp_df,
@@ -268,3 +317,4 @@ cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_a
 cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm.png")), "\n", sep = "")
 cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt.png")), "\n", sep = "")
 cat("- ", out_stats, "\n", sep = "")
+cat("- ", out_zero_types, "\n", sep = "")
