@@ -135,85 +135,136 @@ if (!include_mixed) {
 
 if (nrow(pair_df) == 0) stop("No rows left after filtering.")
 
-pair_stats <- pair_df %>%
-  group_by(section, pair, facet_label, m1, m2, m1_label, m2_label) %>%
-  summarise(
-    n = n(),
-    r = cor(x, y, use = "complete.obs"),
-    slope = ifelse(n() >= 2 && sd(x, na.rm = TRUE) > 0, coef(lm(y ~ x))[2], NA_real_),
-    intercept = ifelse(n() >= 2 && sd(x, na.rm = TRUE) > 0, coef(lm(y ~ x))[1], NA_real_),
-    .groups = "drop"
-  ) %>%
-  mutate(
-    slope_flag = case_when(
-      is.na(slope) ~ "m=NA",
-      abs(slope - 1) < 0.05 ~ "m≈1",
-      slope > 1 ~ "m>1",
-      TRUE ~ "m<1"
-    ),
-    eq_label = if_else(
-      is.na(slope) | is.na(intercept),
-      "y = NA",
-      sprintf("y = %.3fx %+.3f", slope, intercept)
-    ),
-    lbl_top = sprintf("n=%d, r=%.2f\n%s (%s)", n, r, eq_label, slope_flag)
-  )
-
 # -----------------------------
-# 4) Plot by section (tidyverse + non-default colors)
+# 4) Grouped section plots
 # -----------------------------
-prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
-out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
-write_tsv(pair_stats, out_stats)
-
-section_levels <- c("SNP set: ALL vs HM3", "Expression: TPM vs TMM", "Normalization: RAW vs IRNT", "Mixed changes")
-plot_sections <- intersect(section_levels, unique(pair_df$section))
-out_root <- file.path(runs_dir, paste0("pairwise_h2_plots_", prefix))
-dir.create(out_root, recursive = TRUE, showWarnings = FALSE)
-
-for (sec in plot_sections) {
-  sec_df <- pair_df %>% filter(section == sec)
-  sec_stats <- pair_stats %>% filter(section == sec)
-  if (nrow(sec_df) == 0) next
-
-  sec_slug <- sec %>%
-    str_to_lower() %>%
-    str_replace_all("[^a-z0-9]+", "_") %>%
-    str_replace_all("^_|_$", "")
-  sec_dir <- file.path(out_root, sec_slug)
-  dir.create(sec_dir, recursive = TRUE, showWarnings = FALSE)
-
-  for (i in seq_len(nrow(sec_stats))) {
-    row_i <- sec_stats[i, ]
-    pair_i <- sec_df %>% filter(pair == row_i$pair)
-    if (nrow(pair_i) == 0) next
-
-    p <- pair_i %>%
-      ggplot(aes(x = x, y = y)) +
-      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
-      geom_point(color = "#2A9D8F", alpha = 0.4, size = 0.9) +
-      geom_text(
-        data = row_i,
-        aes(x = -Inf, y = Inf, label = lbl_top),
-        inherit.aes = FALSE,
-        hjust = -0.1,
-        vjust = 1.1,
-        size = 3.0,
-        color = "#264653"
-      ) +
-      labs(
-        title = sec,
-        subtitle = "PASS genes only; dropped rows where both estimates are zero",
-        x = paste0("X: ", row_i$m1_label),
-        y = paste0("Y: ", row_i$m2_label)
-      ) +
-      theme_minimal(base_size = 11) +
-      theme(panel.grid.minor = element_blank())
-
-    file_i <- file.path(sec_dir, paste0("scatter_", row_i$m1, "_vs_", row_i$m2, ".png"))
-    ggsave(file_i, p, width = 6.8, height = 5.2, dpi = 300)
-    cat("Saved plot:\n", file_i, "\n")
-  }
+calc_stats <- function(df) {
+  df %>%
+    group_by(facet_label) %>%
+    summarise(
+      n = n(),
+      r = cor(x_plot, y_plot, use = "complete.obs"),
+      slope = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[2], NA_real_),
+      intercept = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[1], NA_real_),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      slope_flag = case_when(
+        is.na(slope) ~ "m=NA",
+        abs(slope - 1) < 0.05 ~ "m≈1",
+        slope > 1 ~ "m>1",
+        TRUE ~ "m<1"
+      ),
+      eq_label = if_else(
+        is.na(slope) | is.na(intercept),
+        "y = NA",
+        sprintf("y = %.3fx %+.3f", slope, intercept)
+      ),
+      lbl_top = sprintf("n=%d, r=%.2f\n%s (%s)", n, r, eq_label, slope_flag)
+    )
 }
 
-cat("Saved stats:\n", out_stats, "\n")
+plot_section <- function(df, title, x_lab, y_lab, out_file) {
+  if (nrow(df) == 0) return(invisible(NULL))
+  stats <- calc_stats(df)
+
+  p <- df %>%
+    ggplot(aes(x = x_plot, y = y_plot)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
+    geom_point(color = "#2A9D8F", alpha = 0.35, size = 0.7) +
+    geom_text(
+      data = stats,
+      aes(x = -Inf, y = Inf, label = lbl_top),
+      inherit.aes = FALSE,
+      hjust = -0.1,
+      vjust = 1.1,
+      size = 2.5,
+      color = "#264653"
+    ) +
+    facet_wrap(~facet_label, scales = "free", ncol = 4) +
+    labs(
+      title = title,
+      subtitle = "PASS genes only; dropped rows where both estimates are zero",
+      x = x_lab,
+      y = y_lab
+    ) +
+    theme_minimal(base_size = 10) +
+    theme(
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold", size = 8)
+    )
+
+  ggsave(out_file, p, width = 14, height = 8, dpi = 300)
+  print(p)
+  invisible(stats)
+}
+
+snp_df <- pair_df %>%
+  filter(section == "SNP set: ALL vs HM3") %>%
+  mutate(
+    x_plot = if_else(m1_snp == "all_snps", x, y),
+    y_plot = if_else(m1_snp == "all_snps", y, x),
+    expr_fix = toupper(if_else(m1_snp == "all_snps", m1_expr, m2_expr)),
+    norm_fix = toupper(if_else(m1_snp == "all_snps", m1_norm, m2_norm)),
+    facet_label = paste(expr_fix, norm_fix, sep = " | ")
+  )
+
+expr_df <- pair_df %>%
+  filter(section == "Expression: TPM vs TMM") %>%
+  mutate(
+    x_plot = if_else(m1_expr == "tpm", x, y),
+    y_plot = if_else(m1_expr == "tpm", y, x),
+    snp_fix = if_else(if_else(m1_expr == "tpm", m1_snp, m2_snp) == "all_snps", "ALL", "HM3"),
+    norm_fix = toupper(if_else(m1_expr == "tpm", m1_norm, m2_norm)),
+    facet_label = paste(snp_fix, norm_fix, sep = " | ")
+  )
+
+norm_df <- pair_df %>%
+  filter(section == "Normalization: RAW vs IRNT") %>%
+  mutate(
+    x_plot = if_else(m1_norm == "raw", x, y),
+    y_plot = if_else(m1_norm == "raw", y, x),
+    snp_fix = if_else(if_else(m1_norm == "raw", m1_snp, m2_snp) == "all_snps", "ALL", "HM3"),
+    expr_fix = toupper(if_else(m1_norm == "raw", m1_expr, m2_expr)),
+    facet_label = paste(snp_fix, expr_fix, sep = " | ")
+  )
+
+prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
+out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
+
+stats_all <- bind_rows(
+  calc_stats(snp_df) %>% mutate(section = "SNP set: ALL vs HM3"),
+  calc_stats(expr_df) %>% mutate(section = "Expression: TPM vs TMM"),
+  calc_stats(norm_df) %>% mutate(section = "Normalization: RAW vs IRNT")
+)
+write_tsv(stats_all, out_stats)
+
+plot_section(
+  snp_df,
+  title = "Pairwise GREML h2: SNP effect (ALL vs HM3)",
+  x_lab = "X-axis h2 (ALL)",
+  y_lab = "Y-axis h2 (HM3)",
+  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3.png"))
+)
+
+plot_section(
+  expr_df,
+  title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
+  x_lab = "X-axis h2 (TPM)",
+  y_lab = "Y-axis h2 (TMM)",
+  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm.png"))
+)
+
+plot_section(
+  norm_df,
+  title = "Pairwise GREML h2: Normalization effect (RAW vs IRNT)",
+  x_lab = "X-axis h2 (RAW)",
+  y_lab = "Y-axis h2 (IRNT)",
+  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt.png"))
+)
+
+cat("Saved grouped plots and stats:\n")
+cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3.png")), "\n", sep = "")
+cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm.png")), "\n", sep = "")
+cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt.png")), "\n", sep = "")
+cat("- ", out_stats, "\n", sep = "")
