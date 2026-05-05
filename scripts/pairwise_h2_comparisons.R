@@ -150,8 +150,7 @@ calc_stats <- function(df) {
       n_abs_y_hi_x_lo = sum(y_plot > 0.05 & x_plot < 0.005, na.rm = TRUE),
       n_fold_x_gt10y = sum(x_plot > 0 & y_plot > 0 & x_plot / y_plot >= 10, na.rm = TRUE),
       n_fold_y_gt10x = sum(x_plot > 0 & y_plot > 0 & y_plot / x_plot >= 10, na.rm = TRUE),
-      slope = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[2], NA_real_),
-      intercept = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ x_plot))[1], NA_real_),
+      slope = ifelse(n() >= 2 && sd(x_plot, na.rm = TRUE) > 0, coef(lm(y_plot ~ 0 + x_plot))[1], NA_real_),
       .groups = "drop"
     ) %>%
     mutate(
@@ -161,11 +160,7 @@ calc_stats <- function(df) {
         slope > 1 ~ "m>1",
         TRUE ~ "m<1"
       ),
-      eq = if_else(
-        is.na(slope) | is.na(intercept),
-        "y = NA",
-        sprintf("y = %.3fx %+.3f", slope, intercept)
-      ),
+      eq = if_else(is.na(slope), "y = NA", sprintf("y = %.3fx (b=0)", slope)),
       lbl_top = sprintf(
         "n=%d, r=%.2f\nmean(X)=%.3f, mean(Y)=%.3f\n%s (%s)\nabs: X>0.05,Y<0.005=%d\nabs: Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d\nfold(>=10x): Y>>X=%d",
         n, r, mean_x, mean_y, eq, slope_flag,
@@ -195,7 +190,7 @@ plot_section <- function(df, title, x_lab, y_lab, out_file) {
     facet_wrap(~facet_label, scales = "free", ncol = 4) +
     labs(
       title = title,
-      subtitle = "PASS genes only",
+      subtitle = "PASS genes only; slope from forced-zero fit (y ~ 0 + x)",
       x = x_lab,
       y = y_lab
     ) +
