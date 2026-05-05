@@ -121,7 +121,8 @@ pair_df <- combn(methods, 2, simplify = FALSE) %>%
     ),
     m1_label = method_to_label(m1),
     m2_label = method_to_label(m2),
-    pair = paste(m1_label, "vs", m2_label)
+    pair = paste(m1_label, "vs", m2_label),
+    facet_label = paste0("X: ", m1_label, "\nY: ", m2_label)
   )
 
 if (!is.null(focus_method)) {
@@ -135,15 +136,27 @@ if (!include_mixed) {
 if (nrow(pair_df) == 0) stop("No rows left after filtering.")
 
 pair_stats <- pair_df %>%
-  group_by(section, pair, m1, m2, m1_label, m2_label) %>%
+  group_by(section, pair, facet_label, m1, m2, m1_label, m2_label) %>%
   summarise(
     n = n(),
     r = cor(x, y, use = "complete.obs"),
+    slope = ifelse(n() >= 2 && sd(x, na.rm = TRUE) > 0, coef(lm(y ~ x))[2], NA_real_),
+    intercept = ifelse(n() >= 2 && sd(x, na.rm = TRUE) > 0, coef(lm(y ~ x))[1], NA_real_),
     .groups = "drop"
   ) %>%
   mutate(
-    lbl_top = sprintf("n=%d, r=%.2f", n, r),
-    lbl_axes = paste0("X: ", m1_label, "\nY: ", m2_label)
+    slope_flag = case_when(
+      is.na(slope) ~ "m=NA",
+      abs(slope - 1) < 0.05 ~ "m≈1",
+      slope > 1 ~ "m>1",
+      TRUE ~ "m<1"
+    ),
+    eq_label = if_else(
+      is.na(slope) | is.na(intercept),
+      "y = NA",
+      sprintf("y = %.3fx %+.3f", slope, intercept)
+    ),
+    lbl_top = sprintf("n=%d, r=%.2f\n%s (%s)", n, r, eq_label, slope_flag)
   )
 
 # -----------------------------
@@ -155,60 +168,52 @@ write_tsv(pair_stats, out_stats)
 
 section_levels <- c("SNP set: ALL vs HM3", "Expression: TPM vs TMM", "Normalization: RAW vs IRNT", "Mixed changes")
 plot_sections <- intersect(section_levels, unique(pair_df$section))
+out_root <- file.path(runs_dir, paste0("pairwise_h2_plots_", prefix))
+dir.create(out_root, recursive = TRUE, showWarnings = FALSE)
 
 for (sec in plot_sections) {
   sec_df <- pair_df %>% filter(section == sec)
   sec_stats <- pair_stats %>% filter(section == sec)
   if (nrow(sec_df) == 0) next
 
-  p <- sec_df %>%
-    ggplot(aes(x = x, y = y)) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
-    geom_point(color = "#2A9D8F", alpha = 0.35, size = 0.6) +
-    geom_text(
-      data = sec_stats,
-      aes(x = -Inf, y = Inf, label = lbl_top),
-      inherit.aes = FALSE,
-      hjust = -0.1,
-      vjust = 1.1,
-      size = 2.3,
-      color = "#264653"
-    ) +
-    geom_text(
-      data = sec_stats,
-      aes(x = -Inf, y = -Inf, label = lbl_axes),
-      inherit.aes = FALSE,
-      hjust = -0.1,
-      vjust = -0.2,
-      size = 2.1,
-      color = "#1D3557"
-    ) +
-    facet_wrap(~pair, scales = "free", ncol = 4) +
-    labs(
-      title = ifelse(
-        is.null(focus_method),
-        paste0("GREML h2 pairwise: ", sec),
-        paste0("GREML h2 pairwise: ", sec, " (vs ", method_to_label(focus_method), ")")
-      ),
-      subtitle = "PASS genes only; dropped rows where both estimates are zero",
-      x = "h2 estimate",
-      y = "h2 estimate"
-    ) +
-    theme_minimal(base_size = 9) +
-    theme(
-      panel.grid.minor = element_blank(),
-      strip.text = element_text(face = "bold", size = 7)
-    )
-
   sec_slug <- sec %>%
     str_to_lower() %>%
     str_replace_all("[^a-z0-9]+", "_") %>%
     str_replace_all("^_|_$", "")
+  sec_dir <- file.path(out_root, sec_slug)
+  dir.create(sec_dir, recursive = TRUE, showWarnings = FALSE)
 
-  out_plot <- file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_", sec_slug, ".png"))
-  ggsave(out_plot, p, width = 14, height = 8, dpi = 300)
-  print(p)
-  cat("Saved plot:\n", out_plot, "\n")
+  for (i in seq_len(nrow(sec_stats))) {
+    row_i <- sec_stats[i, ]
+    pair_i <- sec_df %>% filter(pair == row_i$pair)
+    if (nrow(pair_i) == 0) next
+
+    p <- pair_i %>%
+      ggplot(aes(x = x, y = y)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
+      geom_point(color = "#2A9D8F", alpha = 0.4, size = 0.9) +
+      geom_text(
+        data = row_i,
+        aes(x = -Inf, y = Inf, label = lbl_top),
+        inherit.aes = FALSE,
+        hjust = -0.1,
+        vjust = 1.1,
+        size = 3.0,
+        color = "#264653"
+      ) +
+      labs(
+        title = sec,
+        subtitle = "PASS genes only; dropped rows where both estimates are zero",
+        x = paste0("X: ", row_i$m1_label),
+        y = paste0("Y: ", row_i$m2_label)
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(panel.grid.minor = element_blank())
+
+    file_i <- file.path(sec_dir, paste0("scatter_", row_i$m1, "_vs_", row_i$m2, ".png"))
+    ggsave(file_i, p, width = 6.8, height = 5.2, dpi = 300)
+    cat("Saved plot:\n", file_i, "\n")
+  }
 }
 
 cat("Saved stats:\n", out_stats, "\n")
