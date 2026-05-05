@@ -144,6 +144,8 @@ calc_stats <- function(df) {
     summarise(
       n = n(),
       r = cor(x_plot, y_plot, use = "complete.obs"),
+      mean_x = mean(x_plot, na.rm = TRUE),
+      mean_y = mean(y_plot, na.rm = TRUE),
       n_abs_x_hi_y_lo = sum(x_plot > 0.05 & y_plot < 0.005, na.rm = TRUE),
       n_abs_y_hi_x_lo = sum(y_plot > 0.05 & x_plot < 0.005, na.rm = TRUE),
       n_fold_x_gt10y = sum(x_plot > 0 & y_plot > 0 & x_plot / y_plot >= 10, na.rm = TRUE),
@@ -165,8 +167,8 @@ calc_stats <- function(df) {
         sprintf("y = %.3fx %+.3f", slope, intercept)
       ),
       lbl_top = sprintf(
-        "n=%d, r=%.2f\n%s (%s)\nabs: X>0.05,Y<0.005=%d | Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d | Y>>X=%d",
-        n, r, eq, slope_flag,
+        "n=%d, r=%.2f\nmean(X)=%.3f, mean(Y)=%.3f\n%s (%s)\nabs: X>0.05,Y<0.005=%d | Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d | Y>>X=%d",
+        n, r, mean_x, mean_y, eq, slope_flag,
         n_abs_x_hi_y_lo, n_abs_y_hi_x_lo,
         n_fold_x_gt10y, n_fold_y_gt10x
       )
@@ -180,14 +182,14 @@ plot_section <- function(df, title, x_lab, y_lab, out_file) {
   p <- df %>%
     ggplot(aes(x = x_plot, y = y_plot)) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
-    geom_point(color = "#2A9D8F", alpha = 0.35, size = 0.7) +
+    geom_point(color = "#2A9D8F", alpha = 0.35, size = 0.75) +
     geom_text(
       data = stats,
       aes(x = -Inf, y = Inf, label = lbl_top),
       inherit.aes = FALSE,
       hjust = -0.1,
       vjust = 1.1,
-      size = 2.5,
+      size = 2.8,
       color = "#264653"
     ) +
     facet_wrap(~facet_label, scales = "free", ncol = 4) +
@@ -197,10 +199,10 @@ plot_section <- function(df, title, x_lab, y_lab, out_file) {
       x = x_lab,
       y = y_lab
     ) +
-    theme_minimal(base_size = 10) +
+    theme_minimal(base_size = 10.5) +
     theme(
       panel.grid.minor = element_blank(),
-      strip.text = element_text(face = "bold", size = 8)
+      strip.text = element_text(face = "bold", size = 8.5)
     )
 
   ggsave(out_file, p, width = 14, height = 8, dpi = 300)
