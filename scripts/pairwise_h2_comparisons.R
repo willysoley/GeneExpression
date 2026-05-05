@@ -146,6 +146,9 @@ calc_stats <- function(df) {
       r = cor(x_plot, y_plot, use = "complete.obs"),
       mean_x = mean(x_plot, na.rm = TRUE),
       mean_y = mean(y_plot, na.rm = TRUE),
+      n_x_zero = sum(x_plot == 0, na.rm = TRUE),
+      n_y_zero = sum(y_plot == 0, na.rm = TRUE),
+      n_both_zero = sum(x_plot == 0 & y_plot == 0, na.rm = TRUE),
       n_abs_x_hi_y_lo = sum(x_plot > 0.05 & y_plot < 0.005, na.rm = TRUE),
       n_abs_y_hi_x_lo = sum(y_plot > 0.05 & x_plot < 0.005, na.rm = TRUE),
       n_fold_x_gt10y = sum(x_plot > 0 & y_plot > 0 & x_plot / y_plot >= 10, na.rm = TRUE),
@@ -154,8 +157,8 @@ calc_stats <- function(df) {
     ) %>%
     mutate(
       lbl_top = sprintf(
-        "n=%d, r=%.2f\nmean(X)=%.3f, mean(Y)=%.3f\nabs: X>0.05,Y<0.005=%d\nabs: Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d\nfold(>=10x): Y>>X=%d",
-        n, r, mean_x, mean_y,
+        "n=%d, r=%.2f\nmean(X)=%.3f, mean(Y)=%.3f\nzeros: X=0 -> %d | Y=0 -> %d | both=0 -> %d\nabs: X>0.05,Y<0.005=%d\nabs: Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d\nfold(>=10x): Y>>X=%d",
+        n, r, mean_x, mean_y, n_x_zero, n_y_zero, n_both_zero,
         n_abs_x_hi_y_lo, n_abs_y_hi_x_lo,
         n_fold_x_gt10y, n_fold_y_gt10x
       )
