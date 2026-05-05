@@ -167,7 +167,7 @@ calc_stats <- function(df) {
         sprintf("y = %.3fx %+.3f", slope, intercept)
       ),
       lbl_top = sprintf(
-        "n=%d, r=%.2f\nmean(X)=%.3f, mean(Y)=%.3f\n%s (%s)\nabs: X>0.05,Y<0.005=%d | Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d | Y>>X=%d",
+        "n=%d, r=%.2f\nmean(X)=%.3f, mean(Y)=%.3f\n%s (%s)\nabs: X>0.05,Y<0.005=%d\nabs: Y>0.05,X<0.005=%d\nfold(>=10x): X>>Y=%d\nfold(>=10x): Y>>X=%d",
         n, r, mean_x, mean_y, eq, slope_flag,
         n_abs_x_hi_y_lo, n_abs_y_hi_x_lo,
         n_fold_x_gt10y, n_fold_y_gt10x
