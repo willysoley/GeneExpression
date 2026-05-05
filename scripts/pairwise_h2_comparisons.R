@@ -208,10 +208,10 @@ snp_df <- pair_df %>%
 expr_df <- pair_df %>%
   filter(section == "Expression: TPM vs TMM") %>%
   mutate(
-    x_plot = if_else(m1_expr == "tpm", x, y),
-    y_plot = if_else(m1_expr == "tpm", y, x),
-    snp_fix = if_else(if_else(m1_expr == "tpm", m1_snp, m2_snp) == "all_snps", "ALL", "HM3"),
-    norm_fix = toupper(if_else(m1_expr == "tpm", m1_norm, m2_norm)),
+    x_plot = if_else(m1_expr == "tmm", x, y),
+    y_plot = if_else(m1_expr == "tmm", y, x),
+    snp_fix = if_else(if_else(m1_expr == "tmm", m1_snp, m2_snp) == "all_snps", "ALL", "HM3"),
+    norm_fix = toupper(if_else(m1_expr == "tmm", m1_norm, m2_norm)),
     facet_label = paste(snp_fix, norm_fix, sep = " | ")
   )
 
@@ -265,8 +265,8 @@ plot_section(
 plot_section(
   expr_df,
   title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
-  x_lab = "X-axis h2 (TPM)",
-  y_lab = "Y-axis h2 (TMM)",
+  x_lab = "X-axis h2 (TMM)",
+  y_lab = "Y-axis h2 (TPM)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm.png"))
 )
 
