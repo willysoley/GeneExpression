@@ -10,6 +10,7 @@ runs_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GE
 # 1-vs-all mode: set method id here, e.g. "all_snps_tmm_raw_peerauto_pmg0_npc5"
 # all-pairs mode: keep NULL
 focus_method <- NULL
+include_mixed <- FALSE
 
 # -----------------------------
 # Helpers
@@ -106,6 +107,18 @@ pair_df <- combn(methods, 2, simplify = FALSE) %>%
       filter(!is.na(x), !is.na(y), !(x == 0 & y == 0))
   }) %>%
   mutate(
+    m1_snp = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 2],
+    m1_expr = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 3],
+    m1_norm = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 4],
+    m2_snp = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 2],
+    m2_expr = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 3],
+    m2_norm = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 4],
+    section = case_when(
+      m1_snp != m2_snp & m1_expr == m2_expr & m1_norm == m2_norm ~ "SNP set: ALL vs HM3",
+      m1_snp == m2_snp & m1_expr != m2_expr & m1_norm == m2_norm ~ "Expression: TPM vs TMM",
+      m1_snp == m2_snp & m1_expr == m2_expr & m1_norm != m2_norm ~ "Normalization: RAW vs IRNT",
+      TRUE ~ "Mixed changes"
+    ),
     m1_label = method_to_label(m1),
     m2_label = method_to_label(m2),
     pair = paste(m1_label, "vs", m2_label)
@@ -115,56 +128,87 @@ if (!is.null(focus_method)) {
   pair_df <- pair_df %>% filter(m1 == focus_method | m2 == focus_method)
 }
 
+if (!include_mixed) {
+  pair_df <- pair_df %>% filter(section != "Mixed changes")
+}
+
 if (nrow(pair_df) == 0) stop("No rows left after filtering.")
 
 pair_stats <- pair_df %>%
-  group_by(pair, m1, m2) %>%
+  group_by(section, pair, m1, m2, m1_label, m2_label) %>%
   summarise(
     n = n(),
     r = cor(x, y, use = "complete.obs"),
     .groups = "drop"
+  ) %>%
+  mutate(
+    lbl_top = sprintf("n=%d, r=%.2f", n, r),
+    lbl_axes = paste0("X: ", m1_label, "\nY: ", m2_label)
   )
 
 # -----------------------------
-# 4) Plot (tidyverse + non-default colors)
+# 4) Plot by section (tidyverse + non-default colors)
 # -----------------------------
-p <- pair_df %>%
-  ggplot(aes(x = x, y = y)) +
-  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
-  geom_point(color = "#2A9D8F", alpha = 0.35, size = 0.6) +
-  geom_text(
-    data = pair_stats,
-    aes(x = -Inf, y = Inf, label = sprintf("n=%d, r=%.2f", n, r)),
-    inherit.aes = FALSE,
-    hjust = -0.1,
-    vjust = 1.1,
-    size = 2.3,
-    color = "#264653"
-  ) +
-  facet_wrap(~pair, scales = "free", ncol = ifelse(is.null(focus_method), 5, 4)) +
-  labs(
-    title = ifelse(
-      is.null(focus_method),
-      "All pairwise GREML h2 comparisons",
-      paste0("GREML h2 comparisons vs ", method_to_label(focus_method))
-    ),
-    subtitle = "PASS genes only; dropped rows where both estimates are zero",
-    x = "h2 estimate",
-    y = "h2 estimate"
-  ) +
-  theme_minimal(base_size = 9) +
-  theme(
-    panel.grid.minor = element_blank(),
-    strip.text = element_text(face = "bold", size = 7)
-  )
-
-print(p)
-
 prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
-out_plot <- file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, ".png"))
 out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
-
-ggsave(out_plot, p, width = 16, height = ifelse(is.null(focus_method), 12, 8), dpi = 300)
 write_tsv(pair_stats, out_stats)
 
-cat("Saved:\n", out_plot, "\n", out_stats, "\n")
+section_levels <- c("SNP set: ALL vs HM3", "Expression: TPM vs TMM", "Normalization: RAW vs IRNT", "Mixed changes")
+plot_sections <- intersect(section_levels, unique(pair_df$section))
+
+for (sec in plot_sections) {
+  sec_df <- pair_df %>% filter(section == sec)
+  sec_stats <- pair_stats %>% filter(section == sec)
+  if (nrow(sec_df) == 0) next
+
+  p <- sec_df %>%
+    ggplot(aes(x = x, y = y)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
+    geom_point(color = "#2A9D8F", alpha = 0.35, size = 0.6) +
+    geom_text(
+      data = sec_stats,
+      aes(x = -Inf, y = Inf, label = lbl_top),
+      inherit.aes = FALSE,
+      hjust = -0.1,
+      vjust = 1.1,
+      size = 2.3,
+      color = "#264653"
+    ) +
+    geom_text(
+      data = sec_stats,
+      aes(x = -Inf, y = -Inf, label = lbl_axes),
+      inherit.aes = FALSE,
+      hjust = -0.1,
+      vjust = -0.2,
+      size = 2.1,
+      color = "#1D3557"
+    ) +
+    facet_wrap(~pair, scales = "free", ncol = 4) +
+    labs(
+      title = ifelse(
+        is.null(focus_method),
+        paste0("GREML h2 pairwise: ", sec),
+        paste0("GREML h2 pairwise: ", sec, " (vs ", method_to_label(focus_method), ")")
+      ),
+      subtitle = "PASS genes only; dropped rows where both estimates are zero",
+      x = "h2 estimate",
+      y = "h2 estimate"
+    ) +
+    theme_minimal(base_size = 9) +
+    theme(
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold", size = 7)
+    )
+
+  sec_slug <- sec %>%
+    str_to_lower() %>%
+    str_replace_all("[^a-z0-9]+", "_") %>%
+    str_replace_all("^_|_$", "")
+
+  out_plot <- file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_", sec_slug, ".png"))
+  ggsave(out_plot, p, width = 14, height = 8, dpi = 300)
+  print(p)
+  cat("Saved plot:\n", out_plot, "\n")
+}
+
+cat("Saved stats:\n", out_stats, "\n")
