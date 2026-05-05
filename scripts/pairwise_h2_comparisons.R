@@ -16,6 +16,20 @@ focus_method <- NULL
 # -----------------------------
 normalize_norm <- function(x) if_else(x == "inverse_normal", "irnt", x)
 
+normalize_focus <- function(x) {
+  x %>%
+    str_replace("_inverse_normal_", "_irnt_") %>%
+    str_remove("_peerauto_pmg0_npc5$")
+}
+
+method_to_label <- function(method_id) {
+  m <- str_match(method_id, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")
+  snp_lbl <- if_else(m[, 2] == "all_snps", "ALL", "HM3")
+  expr_lbl <- toupper(m[, 3])
+  norm_lbl <- toupper(m[, 4])
+  paste(snp_lbl, expr_lbl, norm_lbl, sep = " | ")
+}
+
 parse_method <- function(run_name) {
   m <- str_match(run_name, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)_peerauto_pmg0_npc5$")
   tibble(
@@ -24,7 +38,7 @@ parse_method <- function(run_name) {
     expr = m[, 3],
     norm = normalize_norm(m[, 4])
   ) %>%
-    mutate(method = paste(snp_set, expr, norm, "peerauto_pmg0_npc5", sep = "_"))
+    mutate(method = paste(snp_set, expr, norm, sep = "_"))
 }
 
 # -----------------------------
@@ -72,7 +86,7 @@ methods <- setdiff(names(h2_wide), "Gene")
 if (length(methods) < 2) stop("Need at least 2 methods for pairwise comparison.")
 
 if (!is.null(focus_method)) {
-  focus_method <- str_replace(focus_method, "_inverse_normal_", "_irnt_")
+  focus_method <- normalize_focus(focus_method)
   if (!focus_method %in% methods) stop("focus_method not found after normalization: ", focus_method)
 }
 
@@ -91,7 +105,11 @@ pair_df <- combn(methods, 2, simplify = FALSE) %>%
       ) %>%
       filter(!is.na(x), !is.na(y), !(x == 0 & y == 0))
   }) %>%
-  mutate(pair = paste(m1, "vs", m2))
+  mutate(
+    m1_label = method_to_label(m1),
+    m2_label = method_to_label(m2),
+    pair = paste(m1_label, "vs", m2_label)
+  )
 
 if (!is.null(focus_method)) {
   pair_df <- pair_df %>% filter(m1 == focus_method | m2 == focus_method)
@@ -125,10 +143,14 @@ p <- pair_df %>%
   ) +
   facet_wrap(~pair, scales = "free", ncol = ifelse(is.null(focus_method), 5, 4)) +
   labs(
-    title = ifelse(is.null(focus_method), "All pairwise GREML h2 comparisons", paste0("GREML h2 comparisons vs ", focus_method)),
+    title = ifelse(
+      is.null(focus_method),
+      "All pairwise GREML h2 comparisons",
+      paste0("GREML h2 comparisons vs ", method_to_label(focus_method))
+    ),
     subtitle = "PASS genes only; dropped rows where both estimates are zero",
-    x = "h2 estimate (method 1)",
-    y = "h2 estimate (method 2)"
+    x = "h2 estimate",
+    y = "h2 estimate"
   ) +
   theme_minimal(base_size = 9) +
   theme(
