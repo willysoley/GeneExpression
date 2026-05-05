@@ -104,7 +104,7 @@ pair_df <- combn(methods, 2, simplify = FALSE) %>%
         x = .data[[p[1]]],
         y = .data[[p[2]]]
       ) %>%
-      filter(!is.na(x), !is.na(y), !(x == 0 & y == 0))
+      filter(!is.na(x), !is.na(y))
   }) %>%
   mutate(
     m1_snp = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 2],
