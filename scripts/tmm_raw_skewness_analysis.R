@@ -20,11 +20,15 @@ h2_hi_cutoff <- as.numeric(Sys.getenv("H2_HI_CUTOFF", "0.05"))
 h2_lo_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
 skew_hist_bins <- as.integer(Sys.getenv("SKEW_HIST_BINS", "320"))
 expr_hist_bins <- as.integer(Sys.getenv("EXPR_HIST_BINS", "160"))
+max_zero_frac_for_nonzero_high_skew <- as.numeric(Sys.getenv("MAX_ZERO_FRAC_NONZERO_HIGH_SKEW", "0.20"))
 
 if (!is.finite(n_sample_genes) || n_sample_genes < 10) stop("N_SAMPLE_GENES must be >= 10.")
 if (!is.finite(n_examples_each) || n_examples_each < 1) stop("N_EXAMPLES_EACH must be >= 1.")
 if (!is.finite(skew_hist_bins) || skew_hist_bins < 20) stop("SKEW_HIST_BINS must be >= 20.")
 if (!is.finite(expr_hist_bins) || expr_hist_bins < 20) stop("EXPR_HIST_BINS must be >= 20.")
+if (!is.finite(max_zero_frac_for_nonzero_high_skew) || max_zero_frac_for_nonzero_high_skew < 0 || max_zero_frac_for_nonzero_high_skew > 1) {
+  stop("MAX_ZERO_FRAC_NONZERO_HIGH_SKEW must be between 0 and 1.")
+}
 
 # -----------------------------
 # Helpers
@@ -172,6 +176,7 @@ skew_tbl <- tibble(
   mean_expr = colMeans(tmm_sub, na.rm = TRUE),
   median_expr = apply(tmm_sub, 2, median, na.rm = TRUE),
   sd_expr = apply(tmm_sub, 2, sd, na.rm = TRUE),
+  zero_fraction = colMeans(tmm_sub == 0, na.rm = TRUE),
   skewness = apply(tmm_sub, 2, skewness_third_moment)
 ) %>%
   filter(is.finite(skewness))
@@ -201,6 +206,8 @@ out_hist <- file.path(runs_dir, paste0("tmm_raw_skewness_hist_density_", slug, "
 out_scatter <- file.path(runs_dir, paste0("tmm_raw_skewness_mean_vs_skew_", slug, ".png"))
 out_skew_examples_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_genes_", slug, ".tsv"))
 out_skew_examples_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
+out_skew_nonzero_high_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_high_positive_low_zero_selected_genes_", slug, ".tsv"))
+out_skew_nonzero_high_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_high_positive_low_zero_distributions_", slug, ".png"))
 out_h2_examples_tsv <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
 out_h2_examples_plot <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
 
@@ -280,6 +287,53 @@ p_skew_examples <- ggplot(skew_plot_df, aes(x = expr)) +
   theme_minimal(base_size = 10.5) +
   theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold", size = 8))
 ggsave(out_skew_examples_plot, p_skew_examples, width = 13, height = 8, dpi = 300)
+
+# 3b) Additional requested set: high positive skew but low zero-inflation
+skew_high_nonzero <- skew_tbl %>%
+  filter(zero_fraction <= max_zero_frac_for_nonzero_high_skew) %>%
+  arrange(desc(skewness)) %>%
+  slice_head(n = n_examples_each)
+
+if (nrow(skew_high_nonzero) == 0) {
+  warning("No genes met zero_fraction <= ", max_zero_frac_for_nonzero_high_skew, ". Using highest-skew genes with smallest zero_fraction instead.")
+  skew_high_nonzero <- skew_tbl %>%
+    arrange(desc(skewness), zero_fraction) %>%
+    slice_head(n = n_examples_each)
+}
+
+skew_high_nonzero <- skew_high_nonzero %>%
+  mutate(
+    group = paste0("High positive skew | zero_fraction<=", sprintf("%.2f", max_zero_frac_for_nonzero_high_skew)),
+    rank_id = row_number()
+  )
+
+write_tsv(skew_high_nonzero, out_skew_nonzero_high_tsv)
+
+skew_high_nonzero_plot_df <- as_tibble(tmm_sub[, skew_high_nonzero$Gene, drop = FALSE]) %>%
+  mutate(sample_id = rownames(tmm_sub)) %>%
+  pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
+  left_join(skew_high_nonzero %>% select(Gene, skewness, zero_fraction, rank_id), by = "Gene") %>%
+  mutate(
+    facet_label = paste0(
+      "Rank ", rank_id, "\n", Gene,
+      "\nskew=", sprintf("%.2f", skewness),
+      ", zero=", sprintf("%.2f", zero_fraction)
+    ),
+    facet_label = factor(facet_label, levels = unique(facet_label[order(rank_id)]))
+  )
+
+p_skew_high_nonzero <- ggplot(skew_high_nonzero_plot_df, aes(x = expr)) +
+  geom_histogram(bins = expr_hist_bins, fill = "#3A86FF", color = "white", alpha = 0.9) +
+  facet_wrap(~ facet_label, scales = "free_y", ncol = 3) +
+  labs(
+    title = paste0("High positive skew with low zero-inflation - ", method_id),
+    subtitle = paste0("TMM RAW expression distributions across individuals (zero_fraction <= ", sprintf("%.2f", max_zero_frac_for_nonzero_high_skew), ")"),
+    x = "Expression value (post-PEER phenotype values)",
+    y = "Number of individuals"
+  ) +
+  theme_minimal(base_size = 10.5) +
+  theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold", size = 8))
+ggsave(out_skew_nonzero_high_plot, p_skew_high_nonzero, width = 12, height = 7, dpi = 300)
 
 # 4) Requested TPM vs TMM h2 discrepancy examples
 method_match <- str_match(method_id, "^(all_snps|hm3_no_mhc)_tmm_raw$")
@@ -379,5 +433,7 @@ cat("- ", out_hist, "\n", sep = "")
 cat("- ", out_scatter, "\n", sep = "")
 cat("- ", out_skew_examples_tsv, "\n", sep = "")
 cat("- ", out_skew_examples_plot, "\n", sep = "")
+cat("- ", out_skew_nonzero_high_tsv, "\n", sep = "")
+cat("- ", out_skew_nonzero_high_plot, "\n", sep = "")
 cat("- ", out_h2_examples_tsv, "\n", sep = "")
 cat("- ", out_h2_examples_plot, "\n", sep = "")
