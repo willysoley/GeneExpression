@@ -16,11 +16,17 @@ method_id <- Sys.getenv("METHOD_ID", "all_snps_tmm_raw")
 n_sample_genes <- as.integer(Sys.getenv("N_SAMPLE_GENES", "2000"))
 rng_seed <- as.integer(Sys.getenv("RNG_SEED", "1"))
 n_examples_each <- as.integer(Sys.getenv("N_EXAMPLES_EACH", "5"))
+
 h2_hi_cutoff <- as.numeric(Sys.getenv("H2_HI_CUTOFF", "0.05"))
 h2_lo_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
+
 skew_hist_bins <- as.integer(Sys.getenv("SKEW_HIST_BINS", "320"))
 expr_hist_bins <- as.integer(Sys.getenv("EXPR_HIST_BINS", "160"))
-max_zero_frac_for_nonzero_high_skew <- as.numeric(Sys.getenv("MAX_ZERO_FRAC_NONZERO_HIGH_SKEW", "0.20"))
+
+# Stricter low-zero filter for high-skew examples
+max_zero_frac_for_nonzero_high_skew <- as.numeric(Sys.getenv("MAX_ZERO_FRAC_NONZERO_HIGH_SKEW", "0.05"))
+# Majority of counts >10
+min_frac_gt10_for_high_skew <- as.numeric(Sys.getenv("MIN_FRAC_GT10_FOR_HIGH_SKEW", "0.50"))
 
 if (!is.finite(n_sample_genes) || n_sample_genes < 10) stop("N_SAMPLE_GENES must be >= 10.")
 if (!is.finite(n_examples_each) || n_examples_each < 1) stop("N_EXAMPLES_EACH must be >= 1.")
@@ -28,6 +34,9 @@ if (!is.finite(skew_hist_bins) || skew_hist_bins < 20) stop("SKEW_HIST_BINS must
 if (!is.finite(expr_hist_bins) || expr_hist_bins < 20) stop("EXPR_HIST_BINS must be >= 20.")
 if (!is.finite(max_zero_frac_for_nonzero_high_skew) || max_zero_frac_for_nonzero_high_skew < 0 || max_zero_frac_for_nonzero_high_skew > 1) {
   stop("MAX_ZERO_FRAC_NONZERO_HIGH_SKEW must be between 0 and 1.")
+}
+if (!is.finite(min_frac_gt10_for_high_skew) || min_frac_gt10_for_high_skew < 0 || min_frac_gt10_for_high_skew > 1) {
+  stop("MIN_FRAC_GT10_FOR_HIGH_SKEW must be between 0 and 1.")
 }
 
 # -----------------------------
@@ -159,7 +168,7 @@ read_h2_summary <- function(method) {
 }
 
 # -----------------------------
-# Compute skewness on random 2000 genes
+# Compute skewness on random sample
 # -----------------------------
 tmm_obj <- read_expression_matrix(method_id)
 tmm_expr <- tmm_obj$expr
@@ -177,6 +186,7 @@ skew_tbl <- tibble(
   median_expr = apply(tmm_sub, 2, median, na.rm = TRUE),
   sd_expr = apply(tmm_sub, 2, sd, na.rm = TRUE),
   zero_fraction = colMeans(tmm_sub == 0, na.rm = TRUE),
+  frac_gt10 = colMeans(tmm_sub > 10, na.rm = TRUE),
   skewness = apply(tmm_sub, 2, skewness_third_moment)
 ) %>%
   filter(is.finite(skewness))
@@ -206,8 +216,6 @@ out_hist <- file.path(runs_dir, paste0("tmm_raw_skewness_hist_density_", slug, "
 out_scatter <- file.path(runs_dir, paste0("tmm_raw_skewness_mean_vs_skew_", slug, ".png"))
 out_skew_examples_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_genes_", slug, ".tsv"))
 out_skew_examples_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
-out_skew_nonzero_high_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_high_positive_low_zero_selected_genes_", slug, ".tsv"))
-out_skew_nonzero_high_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_high_positive_low_zero_distributions_", slug, ".png"))
 out_h2_examples_tsv <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
 out_h2_examples_plot <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
 
@@ -244,15 +252,17 @@ p_scatter <- ggplot(skew_tbl, aes(x = log2(mean_expr + 1), y = skewness)) +
   theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"))
 ggsave(out_scatter, p_scatter, width = 9, height = 5.5, dpi = 300)
 
-# 3) Requested skewness examples: high+, low-, near zero
+# 3) Combined requested skewness examples
 sel_high <- skew_tbl %>%
   arrange(desc(skewness)) %>%
   slice_head(n = n_examples_each) %>%
   mutate(group = "High positive skew")
+
 sel_low <- skew_tbl %>%
   arrange(skewness) %>%
   slice_head(n = n_examples_each) %>%
   mutate(group = "Low negative skew")
+
 sel_zero <- skew_tbl %>%
   mutate(abs_skew = abs(skewness)) %>%
   arrange(abs_skew) %>%
@@ -260,82 +270,72 @@ sel_zero <- skew_tbl %>%
   select(-abs_skew) %>%
   mutate(group = "Near zero skew")
 
-skew_examples <- bind_rows(sel_high, sel_low, sel_zero) %>%
-  distinct(Gene, .keep_all = TRUE) %>%
+sel_high_low_zero <- skew_tbl %>%
+  filter(zero_fraction <= max_zero_frac_for_nonzero_high_skew) %>%
+  arrange(desc(skewness)) %>%
+  slice_head(n = n_examples_each) %>%
+  mutate(group = paste0("High positive skew | zero<=", sprintf("%.2f", max_zero_frac_for_nonzero_high_skew)))
+
+if (nrow(sel_high_low_zero) == 0) {
+  warning("No genes met strict zero_fraction cutoff. Using fallback selection.")
+  sel_high_low_zero <- skew_tbl %>%
+    arrange(desc(skewness), zero_fraction) %>%
+    slice_head(n = n_examples_each) %>%
+    mutate(group = paste0("High positive skew | zero<=", sprintf("%.2f", max_zero_frac_for_nonzero_high_skew), " (fallback)"))
+}
+
+sel_high_major_gt10 <- skew_tbl %>%
+  filter(frac_gt10 >= min_frac_gt10_for_high_skew) %>%
+  arrange(desc(skewness)) %>%
+  slice_head(n = n_examples_each) %>%
+  mutate(group = paste0("High positive skew | frac(>10)>=", sprintf("%.2f", min_frac_gt10_for_high_skew)))
+
+if (nrow(sel_high_major_gt10) == 0) {
+  warning("No genes met frac_gt10 cutoff. Using fallback selection.")
+  sel_high_major_gt10 <- skew_tbl %>%
+    arrange(desc(skewness), desc(frac_gt10)) %>%
+    slice_head(n = n_examples_each) %>%
+    mutate(group = paste0("High positive skew | frac(>10)>=", sprintf("%.2f", min_frac_gt10_for_high_skew), " (fallback)"))
+}
+
+skew_examples <- bind_rows(
+  sel_high, sel_low, sel_zero, sel_high_low_zero, sel_high_major_gt10
+) %>%
+  group_by(group) %>%
+  mutate(rank_within_group = row_number()) %>%
+  ungroup() %>%
   mutate(rank_id = row_number())
 
 write_tsv(skew_examples, out_skew_examples_tsv)
 
-skew_plot_df <- as_tibble(tmm_sub[, skew_examples$Gene, drop = FALSE]) %>%
+skew_plot_df <- as_tibble(tmm_sub[, unique(skew_examples$Gene), drop = FALSE]) %>%
   mutate(sample_id = rownames(tmm_sub)) %>%
   pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
-  left_join(skew_examples %>% select(Gene, skewness, group, rank_id), by = "Gene") %>%
+  left_join(skew_examples %>% select(Gene, group, rank_id, skewness, zero_fraction, frac_gt10), by = "Gene") %>%
   mutate(
-    facet_label = paste0(group, "\n", Gene, "\nskew=", sprintf("%.2f", skewness)),
+    facet_label = paste0(
+      group, "\n", Gene,
+      "\nskew=", sprintf("%.2f", skewness),
+      ", zero=", sprintf("%.2f", zero_fraction),
+      ", frac>10=", sprintf("%.2f", frac_gt10)
+    ),
     facet_label = factor(facet_label, levels = unique(facet_label[order(rank_id)]))
   )
 
 p_skew_examples <- ggplot(skew_plot_df, aes(x = expr)) +
   geom_histogram(bins = expr_hist_bins, fill = "#4DB6AC", color = "white", alpha = 0.9) +
-  facet_wrap(~ facet_label, scales = "free_y", ncol = 3) +
+  facet_wrap(~ facet_label, scales = "free_y", ncol = 4) +
   labs(
     title = paste0("Selected skewness example genes - ", method_id),
-    subtitle = "TMM RAW expression distribution across individuals",
+    subtitle = "Includes high+/low-/near-zero skew, strict low-zero high-skew, and high-skew majority >10",
     x = "Expression value (post-PEER phenotype values)",
     y = "Number of individuals"
   ) +
   theme_minimal(base_size = 10.5) +
   theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold", size = 8))
-ggsave(out_skew_examples_plot, p_skew_examples, width = 13, height = 8, dpi = 300)
+ggsave(out_skew_examples_plot, p_skew_examples, width = 18, height = 10, dpi = 300)
 
-# 3b) Additional requested set: high positive skew but low zero-inflation
-skew_high_nonzero <- skew_tbl %>%
-  filter(zero_fraction <= max_zero_frac_for_nonzero_high_skew) %>%
-  arrange(desc(skewness)) %>%
-  slice_head(n = n_examples_each)
-
-if (nrow(skew_high_nonzero) == 0) {
-  warning("No genes met zero_fraction <= ", max_zero_frac_for_nonzero_high_skew, ". Using highest-skew genes with smallest zero_fraction instead.")
-  skew_high_nonzero <- skew_tbl %>%
-    arrange(desc(skewness), zero_fraction) %>%
-    slice_head(n = n_examples_each)
-}
-
-skew_high_nonzero <- skew_high_nonzero %>%
-  mutate(
-    group = paste0("High positive skew | zero_fraction<=", sprintf("%.2f", max_zero_frac_for_nonzero_high_skew)),
-    rank_id = row_number()
-  )
-
-write_tsv(skew_high_nonzero, out_skew_nonzero_high_tsv)
-
-skew_high_nonzero_plot_df <- as_tibble(tmm_sub[, skew_high_nonzero$Gene, drop = FALSE]) %>%
-  mutate(sample_id = rownames(tmm_sub)) %>%
-  pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
-  left_join(skew_high_nonzero %>% select(Gene, skewness, zero_fraction, rank_id), by = "Gene") %>%
-  mutate(
-    facet_label = paste0(
-      "Rank ", rank_id, "\n", Gene,
-      "\nskew=", sprintf("%.2f", skewness),
-      ", zero=", sprintf("%.2f", zero_fraction)
-    ),
-    facet_label = factor(facet_label, levels = unique(facet_label[order(rank_id)]))
-  )
-
-p_skew_high_nonzero <- ggplot(skew_high_nonzero_plot_df, aes(x = expr)) +
-  geom_histogram(bins = expr_hist_bins, fill = "#3A86FF", color = "white", alpha = 0.9) +
-  facet_wrap(~ facet_label, scales = "free_y", ncol = 3) +
-  labs(
-    title = paste0("High positive skew with low zero-inflation - ", method_id),
-    subtitle = paste0("TMM RAW expression distributions across individuals (zero_fraction <= ", sprintf("%.2f", max_zero_frac_for_nonzero_high_skew), ")"),
-    x = "Expression value (post-PEER phenotype values)",
-    y = "Number of individuals"
-  ) +
-  theme_minimal(base_size = 10.5) +
-  theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold", size = 8))
-ggsave(out_skew_nonzero_high_plot, p_skew_high_nonzero, width = 12, height = 7, dpi = 300)
-
-# 4) Requested TPM vs TMM h2 discrepancy examples
+# 4) TPM vs TMM h2 discrepancy examples + skewness
 method_match <- str_match(method_id, "^(all_snps|hm3_no_mhc)_tmm_raw$")
 if (!is.na(method_match[1, 2])) {
   snp_set <- method_match[1, 2]
@@ -359,7 +359,7 @@ if (!is.na(method_match[1, 2])) {
 
   h2_examples <- bind_rows(tpm_high, tmm_high) %>%
     distinct(Gene, .keep_all = TRUE) %>%
-    left_join(skew_tbl %>% select(Gene, skewness, mean_expr), by = "Gene")
+    left_join(skew_tbl %>% select(Gene, skewness, zero_fraction, frac_gt10, mean_expr), by = "Gene")
 
   write_tsv(h2_examples, out_h2_examples_tsv)
 
@@ -369,7 +369,6 @@ if (!is.na(method_match[1, 2])) {
     common_genes <- intersect(h2_examples$Gene, intersect(colnames(tmm_obj$expr), colnames(tpm_obj$expr)))
 
     if (length(common_samples) >= 3 && length(common_genes) > 0) {
-      # Add per-gene skewness for the discrepant set in both TMM and TPM.
       skew_tmm_vals <- map_dbl(common_genes, ~ skewness_third_moment(tmm_obj$expr[common_samples, .x]))
       skew_tpm_vals <- map_dbl(common_genes, ~ skewness_third_moment(tpm_obj$expr[common_samples, .x]))
 
@@ -389,6 +388,7 @@ if (!is.na(method_match[1, 2])) {
         mutate(sample_id = common_samples) %>%
         pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
         mutate(method = "TMM RAW")
+
       tpm_long <- as_tibble(tpm_obj$expr[common_samples, common_genes, drop = FALSE]) %>%
         mutate(sample_id = common_samples) %>%
         pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
@@ -396,11 +396,13 @@ if (!is.na(method_match[1, 2])) {
 
       h2_plot_df <- bind_rows(tmm_long, tpm_long) %>%
         left_join(h2_examples, by = "Gene") %>%
-        mutate(facet_label = paste0(
-          group, "\n", Gene,
-          "\nTMM h2=", sprintf("%.3f", h2_tmm), ", TPM h2=", sprintf("%.3f", h2_tpm),
-          "\nskew(TMM)=", sprintf("%.2f", skewness_tmm_raw), ", skew(TPM)=", sprintf("%.2f", skewness_tpm_raw)
-        ))
+        mutate(
+          facet_label = paste0(
+            group, "\n", Gene,
+            "\nTMM h2=", sprintf("%.3f", h2_tmm), ", TPM h2=", sprintf("%.3f", h2_tpm),
+            "\nskew(TMM)=", sprintf("%.2f", skewness_tmm_raw), ", skew(TPM)=", sprintf("%.2f", skewness_tpm_raw)
+          )
+        )
 
       p_h2_examples <- ggplot(h2_plot_df, aes(x = expr, color = method, fill = method)) +
         geom_density(alpha = 0.15, linewidth = 0.7) +
@@ -433,7 +435,6 @@ cat("- ", out_hist, "\n", sep = "")
 cat("- ", out_scatter, "\n", sep = "")
 cat("- ", out_skew_examples_tsv, "\n", sep = "")
 cat("- ", out_skew_examples_plot, "\n", sep = "")
-cat("- ", out_skew_nonzero_high_tsv, "\n", sep = "")
-cat("- ", out_skew_nonzero_high_plot, "\n", sep = "")
 cat("- ", out_h2_examples_tsv, "\n", sep = "")
 cat("- ", out_h2_examples_plot, "\n", sep = "")
+
