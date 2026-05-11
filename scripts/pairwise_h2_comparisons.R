@@ -18,11 +18,6 @@ include_mixed <- FALSE
 # "any_finite" -> always use any finite h2
 fallback_strategy <- "auto"
 
-# PI-driven additions
-skew_reference_method <- "all_snps_tmm_raw"  # TMM (RAW)
-n_random_genes <- 200L
-n_skew_genes_per_tail <- 4L
-
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -146,37 +141,6 @@ read_log_expr_for_run <- function(run_name) {
     mean_expr = mean_expr,
     log_expr = log2(pmax(mean_expr, 0) + 1)
   )
-}
-
-calc_skewness <- function(x) {
-  x <- x[is.finite(x)]
-  n <- length(x)
-  if (n < 3L) return(NA_real_)
-  m <- mean(x)
-  m2 <- mean((x - m)^2)
-  if (!is.finite(m2) || m2 <= 0) return(0)
-  m3 <- mean((x - m)^3)
-  g1 <- m3 / (m2^(3 / 2))
-  # Bias-corrected Fisher-Pearson skewness (still third-moment based)
-  sqrt(n * (n - 1)) / (n - 2) * g1
-}
-
-build_qq_table <- function(mat, genes) {
-  map_dfr(genes, function(g) {
-    vals <- mat[, g]
-    vals <- vals[is.finite(vals)]
-    n <- length(vals)
-    if (n < 3L) return(tibble())
-    mu <- mean(vals)
-    sig <- sd(vals)
-    if (!is.finite(sig) || sig == 0) return(tibble())
-
-    tibble(
-      Gene = g,
-      theo_q = qnorm(ppoints(n)),
-      obs_q = sort((vals - mu) / sig)
-    )
-  })
 }
 
 summarise_h2_long <- function(df) {
@@ -670,6 +634,49 @@ plot_section <- function(df, title, subtitle_text, x_lab, y_lab, out_file, color
   invisible(stats)
 }
 
+plot_tpm_tmm_correlation <- function(df, subtitle_text, out_file) {
+  if (nrow(df) == 0) return(invisible(NULL))
+
+  corr_stats <- df %>%
+    group_by(facet_label) %>%
+    summarise(
+      n = n(),
+      r = cor(x_plot, y_plot, use = "complete.obs"),
+      .groups = "drop"
+    ) %>%
+    mutate(lbl = sprintf("n=%d, r=%.2f", n, r))
+
+  p <- df %>%
+    ggplot(aes(x = x_plot, y = y_plot)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
+    geom_point(alpha = 0.35, color = "#2A9D8F", size = 0.8) +
+    geom_smooth(method = "lm", se = FALSE, color = "#264653", linewidth = 0.55) +
+    geom_text(
+      data = corr_stats,
+      aes(x = -Inf, y = Inf, label = lbl),
+      inherit.aes = FALSE,
+      hjust = -0.1,
+      vjust = 1.1,
+      size = 3.0,
+      color = "#264653"
+    ) +
+    facet_wrap(~facet_label, scales = "free", ncol = 2) +
+    labs(
+      title = "TPM vs TMM Correlation (by normalization)",
+      subtitle = subtitle_text,
+      x = "X-axis h2 (TMM)",
+      y = "Y-axis h2 (TPM)"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(
+      panel.grid.minor = element_blank(),
+      strip.text = element_text(face = "bold", size = 9)
+    )
+
+  ggsave(out_file, p, width = 10, height = 7, dpi = 300)
+  invisible(corr_stats)
+}
+
 out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
 out_discrepancy_types <- file.path(runs_dir, paste0("pairwise_h2_discrepancy_types_", prefix, ".tsv"))
 
@@ -773,108 +780,13 @@ plot_section(
   color_mode = "div"
 )
 
-# -----------------------------
-# 7) Skewness + individual-level raw TMM distributions
-# -----------------------------
-skew_run_name <- method_to_run_name(skew_reference_method)
-skew_data_dir <- file.path(runs_dir, skew_run_name, "results", "data")
-skew_pheno_file <- list.files(skew_data_dir, pattern = "^pheno_.*\\.phenotypes\\.tsv$", full.names = TRUE)
-skew_map_file <- list.files(skew_data_dir, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE)
-
-if (length(skew_pheno_file) > 0 && length(skew_map_file) > 0) {
-  skew_pheno <- fread(skew_pheno_file[1], header = FALSE, sep = "\t", data.table = TRUE)
-  skew_map <- fread(skew_map_file[1], sep = "\t", data.table = TRUE)
-
-  if (all(c("gene_name", "mpheno_index") %in% names(skew_map))) {
-    skew_map <- skew_map[order(as.integer(mpheno_index))]
-    skew_genes <- as.character(skew_map$gene_name)
-
-    if (ncol(skew_pheno) >= 3 && (ncol(skew_pheno) - 2L) == length(skew_genes)) {
-      setnames(skew_pheno, c("FID", "IID", skew_genes))
-
-      skew_mat <- as.matrix(skew_pheno[, ..skew_genes])
-      storage.mode(skew_mat) <- "numeric"
-
-      skew_tbl <- tibble(
-        Gene = skew_genes,
-        n_individuals = colSums(is.finite(skew_mat)),
-        mean_expr = colMeans(skew_mat, na.rm = TRUE),
-        log_expr = log2(pmax(mean_expr, 0) + 1),
-        skewness = apply(skew_mat, 2, calc_skewness)
-      ) %>%
-        arrange(desc(abs(skewness)))
-
-      write_tsv(
-        skew_tbl,
-        file.path(runs_dir, paste0("tmm_raw_gene_skewness_", prefix, ".tsv"))
-      )
-
-      set.seed(1)
-      random_genes <- sample(skew_genes, size = min(n_random_genes, length(skew_genes)), replace = FALSE)
-      random_long <- as_tibble(skew_mat[, random_genes, drop = FALSE]) %>%
-        pivot_longer(cols = everything(), names_to = "Gene", values_to = "expr") %>%
-        filter(is.finite(expr))
-
-      p_random <- random_long %>%
-        ggplot(aes(x = expr)) +
-        geom_histogram(bins = 80, fill = "#2A9D8F", color = "white", linewidth = 0.1) +
-        labs(
-          title = "TMM (RAW): distribution of expression values",
-          subtitle = paste0("Randomly sampled ", length(random_genes), " genes across individuals"),
-          x = "Raw TMM expression",
-          y = "Count"
-        ) +
-        theme_minimal(base_size = 11)
-
-      ggsave(
-        file.path(runs_dir, paste0("tmm_raw_expression_random_distribution_", prefix, ".png")),
-        p_random,
-        width = 10,
-        height = 5.5,
-        dpi = 300
-      )
-
-      selected_skew <- bind_rows(
-        skew_tbl %>% filter(is.finite(skewness)) %>% slice_max(skewness, n = n_skew_genes_per_tail, with_ties = FALSE),
-        skew_tbl %>% filter(is.finite(skewness)) %>% slice_min(skewness, n = n_skew_genes_per_tail, with_ties = FALSE)
-      ) %>%
-        distinct(Gene, .keep_all = TRUE)
-
-      qq_tbl <- build_qq_table(skew_mat, selected_skew$Gene) %>%
-        left_join(selected_skew %>% select(Gene, skewness), by = "Gene") %>%
-        mutate(
-          facet_label = paste0(Gene, "\n", "Skew=", sprintf("%.2f", skewness))
-        )
-
-      if (nrow(qq_tbl) > 0) {
-        p_qq <- qq_tbl %>%
-          ggplot(aes(x = theo_q, y = obs_q)) +
-          geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
-          geom_point(color = "#2A9D8F", alpha = 0.5, size = 0.8) +
-          facet_wrap(~facet_label, scales = "free", ncol = 4) +
-          labs(
-            title = "TMM (RAW): QQ plots for skewness-selected genes",
-            subtitle = "X = theoretical normal quantiles, Y = standardized observed quantiles",
-            x = "Theoretical quantiles",
-            y = "Observed quantiles (standardized)"
-          ) +
-          theme_minimal(base_size = 11) +
-          theme(
-            panel.grid.minor = element_blank(),
-            strip.text = element_text(face = "bold", size = 8.5)
-          )
-
-        ggsave(
-          file.path(runs_dir, paste0("tmm_raw_selected_gene_qq_", prefix, ".png")),
-          p_qq,
-          width = 12,
-          height = 8,
-          dpi = 300
-        )
-      }
-    }
-  }
-}
+# Extra: dedicated TPM vs TMM correlation figure, split by RAW vs IRNT and ALL vs HM3
+tpm_tmm_corr_file <- file.path(runs_dir, paste0("pairwise_h2_tpm_vs_tmm_correlation_", prefix, ".png"))
+plot_tpm_tmm_correlation(
+  expr_df,
+  subtitle_text = plot_subtitle,
+  out_file = tpm_tmm_corr_file
+)
 
 cat("Saved grouped plots and stats:\n")
 cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")), "\n", sep = "")
@@ -888,7 +800,5 @@ cat("- ", out_discrepancy_types, "\n", sep = "")
 cat("- ", method_status_file, "\n", sep = "")
 cat("- ", overlap_file, "\n", sep = "")
 cat("- ", overlap_matrix_file, "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("tmm_raw_gene_skewness_", prefix, ".tsv")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("tmm_raw_expression_random_distribution_", prefix, ".png")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("tmm_raw_selected_gene_qq_", prefix, ".png")), "\n", sep = "")
+cat("- ", tpm_tmm_corr_file, "\n", sep = "")
 cat("Data mode used: ", data_mode, "\n", sep = "")
