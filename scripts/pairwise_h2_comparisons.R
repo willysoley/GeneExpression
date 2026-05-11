@@ -338,7 +338,9 @@ build_overlap_table <- function(source_tbl, method_vec, value_col = "h2") {
 
 build_pair_df_from_long <- function(h2_long_tbl, method_vec) {
   h2_wide_local <- h2_long_tbl %>%
+    select(Gene, method, h2, z, qval) %>%
     pivot_wider(
+      id_cols = Gene,
       names_from = method,
       values_from = c(h2, z, qval),
       names_sep = "__"
