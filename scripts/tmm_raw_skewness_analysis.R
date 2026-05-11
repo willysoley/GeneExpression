@@ -18,9 +18,13 @@ rng_seed <- as.integer(Sys.getenv("RNG_SEED", "1"))
 n_examples_each <- as.integer(Sys.getenv("N_EXAMPLES_EACH", "5"))
 h2_hi_cutoff <- as.numeric(Sys.getenv("H2_HI_CUTOFF", "0.05"))
 h2_lo_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
+skew_hist_bins <- as.integer(Sys.getenv("SKEW_HIST_BINS", "160"))
+expr_hist_bins <- as.integer(Sys.getenv("EXPR_HIST_BINS", "80"))
 
 if (!is.finite(n_sample_genes) || n_sample_genes < 10) stop("N_SAMPLE_GENES must be >= 10.")
 if (!is.finite(n_examples_each) || n_examples_each < 1) stop("N_EXAMPLES_EACH must be >= 1.")
+if (!is.finite(skew_hist_bins) || skew_hist_bins < 20) stop("SKEW_HIST_BINS must be >= 20.")
+if (!is.finite(expr_hist_bins) || expr_hist_bins < 20) stop("EXPR_HIST_BINS must be >= 20.")
 
 # -----------------------------
 # Helpers
@@ -205,7 +209,7 @@ write_tsv(summary_tbl, out_summary)
 
 # 1) Skewness distribution
 p_hist <- ggplot(skew_tbl, aes(x = skewness)) +
-  geom_histogram(aes(y = after_stat(density)), bins = 70, fill = "#2A9D8F", color = "white", alpha = 0.8) +
+  geom_histogram(aes(y = after_stat(density)), bins = skew_hist_bins, fill = "#2A9D8F", color = "white", alpha = 0.8) +
   geom_density(color = "#264653", linewidth = 0.9) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
   labs(
@@ -265,7 +269,7 @@ skew_plot_df <- as_tibble(tmm_sub[, skew_examples$Gene, drop = FALSE]) %>%
   )
 
 p_skew_examples <- ggplot(skew_plot_df, aes(x = expr)) +
-  geom_histogram(bins = 40, fill = "#4DB6AC", color = "white", alpha = 0.9) +
+  geom_histogram(bins = expr_hist_bins, fill = "#4DB6AC", color = "white", alpha = 0.9) +
   facet_wrap(~ facet_label, scales = "free_y", ncol = 3) +
   labs(
     title = paste0("Selected skewness example genes - ", method_id),
@@ -311,6 +315,22 @@ if (!is.na(method_match[1, 2])) {
     common_genes <- intersect(h2_examples$Gene, intersect(colnames(tmm_obj$expr), colnames(tpm_obj$expr)))
 
     if (length(common_samples) >= 3 && length(common_genes) > 0) {
+      # Add per-gene skewness for the discrepant set in both TMM and TPM.
+      skew_tmm_vals <- map_dbl(common_genes, ~ skewness_third_moment(tmm_obj$expr[common_samples, .x]))
+      skew_tpm_vals <- map_dbl(common_genes, ~ skewness_third_moment(tpm_obj$expr[common_samples, .x]))
+
+      h2_examples <- h2_examples %>%
+        left_join(
+          tibble(
+            Gene = common_genes,
+            skewness_tmm_raw = skew_tmm_vals,
+            skewness_tpm_raw = skew_tpm_vals,
+            skewness_delta_tpm_minus_tmm = skew_tpm_vals - skew_tmm_vals
+          ),
+          by = "Gene"
+        )
+      write_tsv(h2_examples, out_h2_examples_tsv)
+
       tmm_long <- as_tibble(tmm_obj$expr[common_samples, common_genes, drop = FALSE]) %>%
         mutate(sample_id = common_samples) %>%
         pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
@@ -322,7 +342,11 @@ if (!is.na(method_match[1, 2])) {
 
       h2_plot_df <- bind_rows(tmm_long, tpm_long) %>%
         left_join(h2_examples, by = "Gene") %>%
-        mutate(facet_label = paste0(group, "\n", Gene, "\nTMM h2=", sprintf("%.3f", h2_tmm), ", TPM h2=", sprintf("%.3f", h2_tpm)))
+        mutate(facet_label = paste0(
+          group, "\n", Gene,
+          "\nTMM h2=", sprintf("%.3f", h2_tmm), ", TPM h2=", sprintf("%.3f", h2_tpm),
+          "\nskew(TMM)=", sprintf("%.2f", skewness_tmm_raw), ", skew(TPM)=", sprintf("%.2f", skewness_tpm_raw)
+        ))
 
       p_h2_examples <- ggplot(h2_plot_df, aes(x = expr, color = method, fill = method)) +
         geom_density(alpha = 0.15, linewidth = 0.7) +
@@ -357,4 +381,3 @@ cat("- ", out_skew_examples_tsv, "\n", sep = "")
 cat("- ", out_skew_examples_plot, "\n", sep = "")
 cat("- ", out_h2_examples_tsv, "\n", sep = "")
 cat("- ", out_h2_examples_plot, "\n", sep = "")
-
