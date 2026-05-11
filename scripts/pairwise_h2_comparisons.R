@@ -30,10 +30,10 @@ normalize_focus <- function(x) {
 }
 
 method_to_label <- function(method_id) {
-  m <- str_match(method_id, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")
+  m <- str_match(method_id, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")
   snp_lbl <- if_else(m[, 2] == "all_snps", "ALL", "HM3")
   expr_lbl <- toupper(m[, 3])
-  norm_lbl <- toupper(m[, 4])
+  norm_lbl <- toupper(normalize_norm(m[, 4]))
   paste(snp_lbl, expr_lbl, norm_lbl, sep = " | ")
 }
 
@@ -224,12 +224,12 @@ pair_df <- combn(methods, 2, simplify = FALSE) %>%
       filter(!is.na(x), !is.na(y))
   }) %>%
   mutate(
-    m1_snp = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 2],
-    m1_expr = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 3],
-    m1_norm = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 4],
-    m2_snp = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 2],
-    m2_expr = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 3],
-    m2_norm = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|raw)$")[, 4],
+    m1_snp = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 2],
+    m1_expr = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 3],
+    m1_norm = normalize_norm(str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 4]),
+    m2_snp = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 2],
+    m2_expr = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 3],
+    m2_norm = normalize_norm(str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 4]),
     section = case_when(
       m1_snp != m2_snp & m1_expr == m2_expr & m1_norm == m2_norm ~ "SNP set: ALL vs HM3",
       m1_snp == m2_snp & m1_expr != m2_expr & m1_norm == m2_norm ~ "Expression: TPM vs TMM",
@@ -243,6 +243,11 @@ pair_df <- combn(methods, 2, simplify = FALSE) %>%
 if (!is.null(focus_method)) {
   pair_df <- pair_df %>% filter(m1 == focus_method | m2 == focus_method)
 }
+
+cat("Methods detected:\n")
+print(methods)
+cat("Section counts before mixed-filter:\n")
+print(table(pair_df$section, useNA = "ifany"))
 
 if (!include_mixed) {
   pair_df <- pair_df %>% filter(section != "Mixed changes")
