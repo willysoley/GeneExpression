@@ -62,10 +62,50 @@ method_to_raw_baseline <- function(method_id) {
 }
 
 normalize_gene_id <- function(x) {
-  x %>%
+  x_norm <- x %>%
     as.character() %>%
     str_trim() %>%
     str_replace("\\.[0-9]+$", "")
+  ensg <- str_extract(x_norm, "ENSG[0-9]+")
+  if_else(!is.na(ensg), ensg, x_norm)
+}
+
+resolve_gene_ids_for_run <- function(gene_raw, run_name) {
+  gene_chr <- as.character(gene_raw)
+  idx_mask <- str_detect(str_trim(gene_chr), "^[0-9]+$")
+  if (mean(idx_mask, na.rm = TRUE) < 0.8) {
+    return(gene_chr)
+  }
+
+  data_dir <- file.path(runs_dir, run_name, "results", "data")
+  map_file <- list.files(data_dir, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE)
+  if (length(map_file) == 0) {
+    warning("Gene IDs look numeric but no gene_index_map found for run: ", run_name)
+    return(gene_chr)
+  }
+
+  map_dt <- fread(map_file[1], sep = "\t", data.table = TRUE)
+  if (!all(c("gene_name", "mpheno_index") %in% names(map_dt))) {
+    warning("Unexpected gene_index_map columns for run: ", run_name)
+    return(gene_chr)
+  }
+
+  map_tbl <- map_dt %>%
+    transmute(
+      mpheno_index = as.integer(mpheno_index),
+      gene_name = as.character(gene_name)
+    )
+
+  idx_tbl <- tibble(
+    row_id = seq_along(gene_chr),
+    mpheno_index = suppressWarnings(as.integer(gene_chr))
+  ) %>%
+    left_join(map_tbl, by = "mpheno_index")
+
+  resolved <- gene_chr
+  replace_mask <- idx_mask & !is.na(idx_tbl$gene_name)
+  resolved[replace_mask] <- idx_tbl$gene_name[replace_mask]
+  resolved
 }
 
 # read one run's phenotype matrix and return per-gene log expression
@@ -194,10 +234,13 @@ h2_raw <- map_dfr(files, function(f) {
 
   if (any(is.na(meta$snp_set))) return(tibble())
 
-  read_tsv(f, show_col_types = FALSE) %>%
+  sum_tbl <- read_tsv(f, show_col_types = FALSE)
+  gene_resolved <- resolve_gene_ids_for_run(sum_tbl$Gene, run_name)
+
+  sum_tbl %>%
     transmute(
       Gene_raw = Gene,
-      Gene = normalize_gene_id(Gene),
+      Gene = normalize_gene_id(gene_resolved),
       Status = toupper(str_trim(Status)),
       h2 = suppressWarnings(as.numeric(h2_GREML)),
       se = suppressWarnings(as.numeric(SE_GREML)),
@@ -240,6 +283,7 @@ method_status_summary <- h2_raw %>%
     n_nonpass_finite_h2 = sum(Status != "PASS" & is.finite(h2)),
     n_any_finite_h2 = sum(is.finite(h2)),
     n_fail_rows = sum(Status != "PASS"),
+    pct_ensg_like = mean(str_detect(Gene, "^ENSG[0-9]+$"), na.rm = TRUE),
     .groups = "drop"
   )
 
