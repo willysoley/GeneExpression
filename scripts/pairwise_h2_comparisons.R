@@ -143,6 +143,102 @@ read_log_expr_for_run <- function(run_name) {
   )
 }
 
+read_expression_phenotype_for_method <- function(method_id) {
+  run_name <- method_to_run_name(method_id)
+  data_dir <- file.path(runs_dir, run_name, "results", "data")
+  pheno_file <- list.files(data_dir, pattern = "^pheno_.*\\.phenotypes\\.tsv$", full.names = TRUE)
+  map_file <- list.files(data_dir, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE)
+
+  if (length(pheno_file) == 0 || length(map_file) == 0) {
+    warning("Missing phenotype/map file for method: ", method_id, " (run=", run_name, ")")
+    return(NULL)
+  }
+
+  pheno <- fread(pheno_file[1], header = FALSE, sep = "\t", data.table = TRUE)
+  map_dt <- fread(map_file[1], sep = "\t", data.table = TRUE)
+  if (!all(c("gene_name", "mpheno_index") %in% names(map_dt))) {
+    warning("Unexpected gene index map columns for method: ", method_id)
+    return(NULL)
+  }
+
+  map_dt <- map_dt[order(as.integer(mpheno_index))]
+  genes <- normalize_gene_id(as.character(map_dt$gene_name))
+  if (ncol(pheno) < 3 || (ncol(pheno) - 2L) != length(genes)) {
+    warning("Phenotype/map dimension mismatch for method: ", method_id)
+    return(NULL)
+  }
+
+  expr_mat <- as.matrix(pheno[, -(1:2), with = FALSE])
+  storage.mode(expr_mat) <- "numeric"
+  sample_id <- paste0(as.character(pheno[[1]]), "::", as.character(pheno[[2]]))
+  rownames(expr_mat) <- sample_id
+
+  # Collapse duplicate gene IDs (rare) by averaging duplicate columns.
+  if (anyDuplicated(genes) > 0L) {
+    idx <- split(seq_along(genes), genes)
+    expr_mat <- do.call(cbind, lapply(idx, function(ii) {
+      if (length(ii) == 1L) {
+        expr_mat[, ii]
+      } else {
+        rowMeans(expr_mat[, ii, drop = FALSE], na.rm = TRUE)
+      }
+    }))
+    colnames(expr_mat) <- names(idx)
+  } else {
+    colnames(expr_mat) <- genes
+  }
+
+  expr_mat <- as.matrix(expr_mat)
+  rownames(expr_mat) <- sample_id
+
+  list(
+    method = method_id,
+    run_name = run_name,
+    expr = expr_mat
+  )
+}
+
+compute_tpm_tmm_expression_correlations <- function() {
+  combos <- tidyr::crossing(
+    snp_set = c("all_snps", "hm3_no_mhc"),
+    norm = c("raw", "irnt")
+  )
+
+  map_dfr(seq_len(nrow(combos)), function(i) {
+    snp <- combos$snp_set[i]
+    norm <- combos$norm[i]
+    tmm_method <- paste(snp, "tmm", norm, sep = "_")
+    tpm_method <- paste(snp, "tpm", norm, sep = "_")
+
+    tmm_obj <- read_expression_phenotype_for_method(tmm_method)
+    tpm_obj <- read_expression_phenotype_for_method(tpm_method)
+    if (is.null(tmm_obj) || is.null(tpm_obj)) return(tibble())
+
+    common_samples <- intersect(rownames(tmm_obj$expr), rownames(tpm_obj$expr))
+    common_genes <- intersect(colnames(tmm_obj$expr), colnames(tpm_obj$expr))
+    if (length(common_samples) < 3L || length(common_genes) == 0L) return(tibble())
+
+    tmm_mat <- tmm_obj$expr[common_samples, common_genes, drop = FALSE]
+    tpm_mat <- tpm_obj$expr[common_samples, common_genes, drop = FALSE]
+
+    gene_cor <- vapply(seq_along(common_genes), function(j) {
+      cor(tmm_mat[, j], tpm_mat[, j], use = "pairwise.complete.obs")
+    }, numeric(1))
+
+    tibble(
+      Gene = common_genes,
+      snp_set = snp,
+      norm = norm,
+      cor_expr_tpm_vs_tmm = gene_cor,
+      mean_tmm = colMeans(tmm_mat, na.rm = TRUE),
+      mean_tpm = colMeans(tpm_mat, na.rm = TRUE),
+      n_samples = length(common_samples),
+      n_genes_overlap = length(common_genes),
+      panel = paste(if_else(snp == "all_snps", "ALL", "HM3"), toupper(norm), sep = " | ")
+    )
+  })
+}
+
 summarise_h2_long <- function(df) {
   df %>%
     group_by(Gene, method) %>%
