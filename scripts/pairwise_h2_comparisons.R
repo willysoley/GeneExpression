@@ -12,6 +12,11 @@ runs_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GE
 # all-pairs mode: keep NULL
 focus_method <- NULL
 include_mixed <- FALSE
+# fallback strategy when PASS-only intersections are empty:
+# "auto" -> try PASS finite first, then fall back to any finite h2 (including non-PASS)
+# "strict" -> require PASS finite intersections
+# "any_finite" -> always use any finite h2
+fallback_strategy <- "auto"
 
 # PI-driven additions
 skew_reference_method <- "all_snps_tmm_raw"  # TMM (RAW)
@@ -54,6 +59,13 @@ method_to_run_name <- function(method_id) {
 
 method_to_raw_baseline <- function(method_id) {
   str_replace(method_id, "_(irnt|raw)$", "_raw")
+}
+
+normalize_gene_id <- function(x) {
+  x %>%
+    as.character() %>%
+    str_trim() %>%
+    str_replace("\\.[0-9]+$", "")
 }
 
 # read one run's phenotype matrix and return per-gene log expression
@@ -127,6 +139,43 @@ build_qq_table <- function(mat, genes) {
   })
 }
 
+summarise_h2_long <- function(df) {
+  df %>%
+    group_by(Gene, method) %>%
+    summarise(
+      h2 = mean(h2, na.rm = TRUE),
+      se = mean(se, na.rm = TRUE),
+      pval = mean(pval, na.rm = TRUE),
+      z = mean(z, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    group_by(method) %>%
+    mutate(qval = p.adjust(pval, method = "BH")) %>%
+    ungroup()
+}
+
+build_overlap_matrix <- function(source_tbl, method_vec, value_col = "h2") {
+  out <- matrix(0L, nrow = length(method_vec), ncol = length(method_vec), dimnames = list(method_vec, method_vec))
+  if (length(method_vec) == 0) return(out)
+
+  gene_sets <- setNames(
+    lapply(method_vec, function(m) {
+      source_tbl %>%
+        filter(method == m, is.finite(.data[[value_col]])) %>%
+        pull(Gene) %>%
+        unique()
+    }),
+    method_vec
+  )
+
+  for (i in seq_along(method_vec)) {
+    for (j in seq_along(method_vec)) {
+      out[i, j] <- length(intersect(gene_sets[[i]], gene_sets[[j]]))
+    }
+  }
+  out
+}
+
 # -----------------------------
 # 1) Read all summary files
 # -----------------------------
@@ -139,7 +188,7 @@ files <- list.files(
 
 if (length(files) == 0) stop("No summary files found under: ", runs_dir)
 
-h2_long <- map_dfr(files, function(f) {
+h2_raw <- map_dfr(files, function(f) {
   run_name <- str_match(f, "runs/([^/]+)/results/summary/")[, 2]
   meta <- parse_method(run_name)
 
@@ -147,57 +196,207 @@ h2_long <- map_dfr(files, function(f) {
 
   read_tsv(f, show_col_types = FALSE) %>%
     transmute(
-      Gene,
-      Status,
+      Gene_raw = Gene,
+      Gene = normalize_gene_id(Gene),
+      Status = toupper(str_trim(Status)),
       h2 = suppressWarnings(as.numeric(h2_GREML)),
       se = suppressWarnings(as.numeric(SE_GREML)),
       pval = suppressWarnings(as.numeric(Pval_GREML)),
+      run_name = run_name,
       method = meta$method
     )
-}) %>%
+})
+
+if (nrow(h2_raw) == 0) {
+  stop("No parseable summary rows were found. Check run directory naming and parse_method regex.")
+}
+
+method_run_counts <- h2_raw %>%
+  distinct(method, run_name) %>%
+  count(method, name = "n_runs")
+
+if (any(method_run_counts$n_runs > 1L)) {
+  warning(
+    "Multiple runs detected for at least one method. ",
+    "This can create disjoint gene universes if runs came from different cohorts/sweeps.\n",
+    paste0(
+      apply(
+        as.data.frame(method_run_counts %>% filter(n_runs > 1L)),
+        1,
+        function(r) paste0("  - ", r[["method"]], ": ", r[["n_runs"]], " runs")
+      ),
+      collapse = "\n"
+    )
+  )
+}
+
+method_status_summary <- h2_raw %>%
+  group_by(method) %>%
+  summarise(
+    n_rows = n(),
+    n_genes_total = n_distinct(Gene),
+    n_pass_rows = sum(Status == "PASS"),
+    n_pass_finite_h2 = sum(Status == "PASS" & is.finite(h2)),
+    n_nonpass_finite_h2 = sum(Status != "PASS" & is.finite(h2)),
+    n_any_finite_h2 = sum(is.finite(h2)),
+    n_fail_rows = sum(Status != "PASS"),
+    .groups = "drop"
+  )
+
+cat("Method-level status summary:\n")
+print(method_status_summary)
+
+h2_long_pass <- h2_raw %>%
   filter(Status == "PASS", is.finite(h2)) %>%
   mutate(
     z = if_else(is.finite(se) & se > 0, h2 / se, NA_real_)
-  )
-
-if (nrow(h2_long) == 0) stop("No PASS h2 values found.")
-
-# Collapse duplicates created by inverse_normal -> irnt harmonization
-h2_long <- h2_long %>%
-  group_by(Gene, method) %>%
-  summarise(
-    h2 = mean(h2, na.rm = TRUE),
-    se = mean(se, na.rm = TRUE),
-    pval = mean(pval, na.rm = TRUE),
-    z = mean(z, na.rm = TRUE),
-    .groups = "drop"
   ) %>%
-  group_by(method) %>%
-  mutate(qval = p.adjust(pval, method = "BH")) %>%
-  ungroup()
+  summarise_h2_long()
 
-# -----------------------------
-# 2) Gene x method matrix
-# -----------------------------
-h2_wide <- h2_long %>%
-  pivot_wider(
-    names_from = method,
-    values_from = c(h2, z, qval),
-    names_sep = "__"
-  )
+h2_long_any <- h2_raw %>%
+  filter(is.finite(h2)) %>%
+  mutate(
+    z = if_else(is.finite(se) & se > 0, h2 / se, NA_real_)
+  ) %>%
+  summarise_h2_long()
 
-methods <- h2_long %>% distinct(method) %>% pull(method) %>% sort()
+methods <- h2_raw %>% distinct(method) %>% pull(method) %>% sort()
 if (length(methods) < 2) stop("Need at least 2 methods for pairwise comparison.")
 
 if (!is.null(focus_method)) {
   focus_method <- normalize_focus(focus_method)
   if (!focus_method %in% methods) stop("focus_method not found after normalization: ", focus_method)
 }
+fallback_strategy <- match.arg(fallback_strategy, c("auto", "strict", "any_finite"))
+
+build_overlap_table <- function(source_tbl, method_vec, value_col = "h2") {
+  combn(method_vec, 2, simplify = FALSE) %>%
+    map_dfr(function(p) {
+      m1 <- p[1]
+      m2 <- p[2]
+      g1 <- source_tbl %>%
+        filter(method == m1, is.finite(.data[[value_col]])) %>%
+        pull(Gene) %>%
+        unique()
+      g2 <- source_tbl %>%
+        filter(method == m2, is.finite(.data[[value_col]])) %>%
+        pull(Gene) %>%
+        unique()
+      tibble(
+        m1 = m1,
+        m2 = m2,
+        n_genes_m1 = length(g1),
+        n_genes_m2 = length(g2),
+        n_overlap = length(intersect(g1, g2))
+      )
+    })
+}
+
+build_pair_df_from_long <- function(h2_long_tbl, method_vec) {
+  h2_wide_local <- h2_long_tbl %>%
+    pivot_wider(
+      names_from = method,
+      values_from = c(h2, z, qval),
+      names_sep = "__"
+    )
+
+  combn(method_vec, 2, simplify = FALSE) %>%
+    map_dfr(function(p) {
+      h2_wide_local %>%
+        transmute(
+          Gene,
+          m1 = p[1],
+          m2 = p[2],
+          x = .data[[paste0("h2__", p[1])]],
+          y = .data[[paste0("h2__", p[2])]],
+          x_z = .data[[paste0("z__", p[1])]],
+          y_z = .data[[paste0("z__", p[2])]],
+          x_q = .data[[paste0("qval__", p[1])]],
+          y_q = .data[[paste0("qval__", p[2])]]
+        ) %>%
+        filter(!is.na(x), !is.na(y))
+    }) %>%
+    mutate(
+      m1_snp = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 2],
+      m1_expr = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 3],
+      m1_norm = normalize_norm(str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 4]),
+      m2_snp = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 2],
+      m2_expr = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 3],
+      m2_norm = normalize_norm(str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 4]),
+      section = case_when(
+        m1_snp != m2_snp & m1_expr == m2_expr & m1_norm == m2_norm ~ "SNP set: ALL vs HM3",
+        m1_snp == m2_snp & m1_expr != m2_expr & m1_norm == m2_norm ~ "Expression: TPM vs TMM",
+        m1_snp == m2_snp & m1_expr == m2_expr & m1_norm != m2_norm ~ "Normalization: RAW vs IRNT",
+        TRUE ~ "Mixed changes"
+      ),
+      m1_label = method_to_label(m1),
+      m2_label = method_to_label(m2)
+    )
+}
+
+prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
+method_status_file <- file.path(runs_dir, paste0("pairwise_method_status_", prefix, ".tsv"))
+write_tsv(method_status_summary, method_status_file)
+
+overlap_all_tbl <- build_overlap_table(h2_raw %>% filter(is.finite(h2)), methods)
+overlap_pass_tbl <- build_overlap_table(h2_long_pass, methods)
+
+overlap_file <- file.path(
+  runs_dir,
+  paste0("pairwise_gene_overlap_diagnostics_", prefix, ".tsv")
+)
+overlap_diag <- overlap_pass_tbl %>%
+  left_join(
+    overlap_all_tbl %>% select(m1, m2, n_overlap_all = n_overlap),
+    by = c("m1", "m2")
+  ) %>%
+  mutate(
+    n_overlap_fail_only = pmax(n_overlap_all - n_overlap, 0L)
+  )
+write_tsv(overlap_diag, overlap_file)
+
+overlap_mat_pass <- build_overlap_matrix(h2_long_pass, methods, value_col = "h2")
+overlap_mat_any <- build_overlap_matrix(h2_raw %>% filter(is.finite(h2)), methods, value_col = "h2")
+overlap_matrix_file <- file.path(runs_dir, paste0("pairwise_overlap_matrix_", prefix, ".tsv"))
+bind_rows(
+  as_tibble(as.data.frame(as.table(overlap_mat_pass))) %>%
+    transmute(mode = "pass_finite", method_x = Var1, method_y = Var2, n_overlap = as.integer(Freq)),
+  as_tibble(as.data.frame(as.table(overlap_mat_any))) %>%
+    transmute(mode = "any_finite", method_x = Var1, method_y = Var2, n_overlap = as.integer(Freq))
+) %>%
+  write_tsv(overlap_matrix_file)
+cat("Pairwise overlap matrix (PASS + finite h2):\n")
+print(overlap_mat_pass, quote = FALSE)
+cat("Pairwise overlap matrix (any finite h2; PASS + non-PASS):\n")
+print(overlap_mat_any, quote = FALSE)
+
+data_mode <- if (identical(fallback_strategy, "any_finite")) "any_finite" else "pass_finite"
+h2_long_active <- if (identical(data_mode, "pass_finite")) h2_long_pass else h2_long_any
+
+if (nrow(h2_long_active) == 0 &&
+    identical(data_mode, "pass_finite") &&
+    identical(fallback_strategy, "auto")) {
+  message("No PASS-finite rows available; falling back to any finite h2 across statuses.")
+  data_mode <- "any_finite"
+  h2_long_active <- h2_long_any
+}
+
+if (nrow(h2_long_active) == 0) {
+  stop(
+    "No finite h2 rows available for the selected fallback strategy. ",
+    "See method-specific report: ", method_status_file
+  )
+}
+
+methods_active <- h2_long_active %>% distinct(method) %>% pull(method) %>% sort()
+if (length(methods_active) < 2) {
+  stop("Need at least 2 methods with finite h2 in active mode: ", data_mode)
+}
 
 # -----------------------------
 # 3) Log-expression map from RAW baselines
 # -----------------------------
-raw_methods <- methods %>% map_chr(method_to_raw_baseline) %>% unique()
+raw_methods <- methods_active %>% map_chr(method_to_raw_baseline) %>% unique()
 log_expr_map <- map_dfr(raw_methods, function(m_raw) {
   run_name <- method_to_run_name(m_raw)
   read_log_expr_for_run(run_name) %>%
@@ -207,45 +406,17 @@ log_expr_map <- map_dfr(raw_methods, function(m_raw) {
 # -----------------------------
 # 4) Build pairwise table
 # -----------------------------
-pair_df <- combn(methods, 2, simplify = FALSE) %>%
-  map_dfr(function(p) {
-    h2_wide %>%
-      transmute(
-        Gene,
-        m1 = p[1],
-        m2 = p[2],
-        x = .data[[paste0("h2__", p[1])]],
-        y = .data[[paste0("h2__", p[2])]],
-        x_z = .data[[paste0("z__", p[1])]],
-        y_z = .data[[paste0("z__", p[2])]],
-        x_q = .data[[paste0("qval__", p[1])]],
-        y_q = .data[[paste0("qval__", p[2])]]
-      ) %>%
-      filter(!is.na(x), !is.na(y))
-  }) %>%
-  mutate(
-    m1_snp = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 2],
-    m1_expr = str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 3],
-    m1_norm = normalize_norm(str_match(m1, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 4]),
-    m2_snp = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 2],
-    m2_expr = str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 3],
-    m2_norm = normalize_norm(str_match(m2, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(irnt|inverse_normal|raw)$")[, 4]),
-    section = case_when(
-      m1_snp != m2_snp & m1_expr == m2_expr & m1_norm == m2_norm ~ "SNP set: ALL vs HM3",
-      m1_snp == m2_snp & m1_expr != m2_expr & m1_norm == m2_norm ~ "Expression: TPM vs TMM",
-      m1_snp == m2_snp & m1_expr == m2_expr & m1_norm != m2_norm ~ "Normalization: RAW vs IRNT",
-      TRUE ~ "Mixed changes"
-    ),
-    m1_label = method_to_label(m1),
-    m2_label = method_to_label(m2)
-  )
+pair_df <- build_pair_df_from_long(h2_long_active, methods_active)
 
 if (!is.null(focus_method)) {
   pair_df <- pair_df %>% filter(m1 == focus_method | m2 == focus_method)
+  overlap_diag <- overlap_diag %>% filter(m1 == focus_method | m2 == focus_method)
 }
 
-cat("Methods detected:\n")
-print(methods)
+cat("Methods detected in active mode:\n")
+print(methods_active)
+cat("Pairwise overlap diagnostics (PASS vs all finite h2):\n")
+print(overlap_diag)
 cat("Section counts before mixed-filter:\n")
 print(table(pair_df$section, useNA = "ifany"))
 
@@ -253,7 +424,43 @@ if (!include_mixed) {
   pair_df <- pair_df %>% filter(section != "Mixed changes")
 }
 
-if (nrow(pair_df) == 0) stop("No rows left after filtering.")
+if (nrow(pair_df) == 0 &&
+    identical(data_mode, "pass_finite") &&
+    identical(fallback_strategy, "auto")) {
+  message("No PASS pair rows after filters; retrying with any finite h2 across statuses.")
+  data_mode <- "any_finite"
+  h2_long_active <- h2_long_any
+  methods_active <- h2_long_active %>% distinct(method) %>% pull(method) %>% sort()
+  raw_methods <- methods_active %>% map_chr(method_to_raw_baseline) %>% unique()
+  log_expr_map <- map_dfr(raw_methods, function(m_raw) {
+    run_name <- method_to_run_name(m_raw)
+    read_log_expr_for_run(run_name) %>%
+      mutate(raw_method = m_raw)
+  })
+  pair_df <- build_pair_df_from_long(h2_long_active, methods_active)
+  if (!is.null(focus_method)) {
+    pair_df <- pair_df %>% filter(m1 == focus_method | m2 == focus_method)
+  }
+  if (!include_mixed) {
+    pair_df <- pair_df %>% filter(section != "Mixed changes")
+  }
+  cat("Section counts after fallback to any_finite:\n")
+  print(table(pair_df$section, useNA = "ifany"))
+}
+
+if (nrow(pair_df) == 0) {
+  stop(
+    "No rows left after filtering (mode=", data_mode, "). ",
+    "See method-specific report: ", method_status_file, " and overlap diagnostics: ", overlap_file,
+    ". Set fallback_strategy='any_finite' to force non-PASS finite fallback."
+  )
+}
+
+plot_subtitle <- if (identical(data_mode, "pass_finite")) {
+  "PASS genes only"
+} else {
+  "Finite h2 genes (PASS + non-PASS fallback)"
+}
 
 # -----------------------------
 # 5) Orient x/y for grouped sections
@@ -369,7 +576,7 @@ calc_stats <- function(df) {
     )
 }
 
-plot_section <- function(df, title, x_lab, y_lab, out_file, color_var, color_label, color_mode = c("seq", "div")) {
+plot_section <- function(df, title, subtitle_text, x_lab, y_lab, out_file, color_var, color_label, color_mode = c("seq", "div")) {
   if (nrow(df) == 0) return(invisible(NULL))
   color_mode <- match.arg(color_mode)
   stats <- calc_stats(df)
@@ -390,7 +597,7 @@ plot_section <- function(df, title, x_lab, y_lab, out_file, color_var, color_lab
     facet_wrap(~facet_label, scales = "free", ncol = 4) +
     labs(
       title = title,
-      subtitle = "PASS genes only",
+      subtitle = subtitle_text,
       x = x_lab,
       y = y_lab,
       color = color_label
@@ -417,7 +624,6 @@ plot_section <- function(df, title, x_lab, y_lab, out_file, color_var, color_lab
   invisible(stats)
 }
 
-prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
 out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
 out_discrepancy_types <- file.path(runs_dir, paste0("pairwise_h2_discrepancy_types_", prefix, ".tsv"))
 
@@ -425,7 +631,8 @@ stats_all <- bind_rows(
   calc_stats(snp_df) %>% mutate(section = "SNP set: ALL vs HM3"),
   calc_stats(expr_df) %>% mutate(section = "Expression: TPM vs TMM"),
   calc_stats(norm_df) %>% mutate(section = "Normalization: RAW vs IRNT")
-)
+) %>%
+  mutate(data_mode = data_mode)
 write_tsv(stats_all, out_stats)
 
 discrepancy_type_counts <- stats_all %>%
@@ -450,6 +657,7 @@ write_tsv(discrepancy_type_counts, out_discrepancy_types)
 plot_section(
   snp_df,
   title = "Pairwise GREML h2: SNP effect (ALL vs HM3)",
+  subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (ALL)",
   y_lab = "Y-axis h2 (HM3)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")),
@@ -461,6 +669,7 @@ plot_section(
 plot_section(
   expr_df,
   title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
+  subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (TMM)",
   y_lab = "Y-axis h2 (TPM)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")),
@@ -472,6 +681,7 @@ plot_section(
 plot_section(
   norm_df,
   title = "Pairwise GREML h2: Normalization effect (RAW vs IRNT)",
+  subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (RAW)",
   y_lab = "Y-axis h2 (IRNT)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")),
@@ -484,6 +694,7 @@ plot_section(
 plot_section(
   snp_df,
   title = "Pairwise GREML h2: SNP effect (ALL vs HM3)",
+  subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (ALL)",
   y_lab = "Y-axis h2 (HM3)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")),
@@ -495,6 +706,7 @@ plot_section(
 plot_section(
   expr_df,
   title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
+  subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (TMM)",
   y_lab = "Y-axis h2 (TPM)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_zscore.png")),
@@ -506,6 +718,7 @@ plot_section(
 plot_section(
   norm_df,
   title = "Pairwise GREML h2: Normalization effect (RAW vs IRNT)",
+  subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (RAW)",
   y_lab = "Y-axis h2 (IRNT)",
   out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")),
@@ -626,6 +839,10 @@ cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expressio
 cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")), "\n", sep = "")
 cat("- ", out_stats, "\n", sep = "")
 cat("- ", out_discrepancy_types, "\n", sep = "")
+cat("- ", method_status_file, "\n", sep = "")
+cat("- ", overlap_file, "\n", sep = "")
+cat("- ", overlap_matrix_file, "\n", sep = "")
 cat("- ", file.path(runs_dir, paste0("tmm_raw_gene_skewness_", prefix, ".tsv")), "\n", sep = "")
 cat("- ", file.path(runs_dir, paste0("tmm_raw_expression_random_distribution_", prefix, ".png")), "\n", sep = "")
 cat("- ", file.path(runs_dir, paste0("tmm_raw_selected_gene_qq_", prefix, ".png")), "\n", sep = "")
+cat("Data mode used: ", data_mode, "\n", sep = "")
