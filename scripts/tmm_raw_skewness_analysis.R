@@ -10,16 +10,17 @@ suppressPackageStartupMessages({
 runs_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs"
 run_suffix <- "_peerauto_pmg0_npc5"
 
-# Override via env vars if needed:
-# METHOD_ID=hm3_no_mhc_tmm_raw N_SAMPLE_GENES=2000 RNG_SEED=1 Rscript script.R
+# Example:
+# METHOD_ID=all_snps_tmm_raw N_SAMPLE_GENES=2000 RNG_SEED=1 N_EXAMPLES_EACH=5 Rscript script.R
 method_id <- Sys.getenv("METHOD_ID", "all_snps_tmm_raw")
 n_sample_genes <- as.integer(Sys.getenv("N_SAMPLE_GENES", "2000"))
 rng_seed <- as.integer(Sys.getenv("RNG_SEED", "1"))
-n_example_genes <- 12L
+n_examples_each <- as.integer(Sys.getenv("N_EXAMPLES_EACH", "5"))
+h2_hi_cutoff <- as.numeric(Sys.getenv("H2_HI_CUTOFF", "0.05"))
+h2_lo_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
 
-if (!is.finite(n_sample_genes) || n_sample_genes < 10) {
-  stop("N_SAMPLE_GENES must be >= 10.")
-}
+if (!is.finite(n_sample_genes) || n_sample_genes < 10) stop("N_SAMPLE_GENES must be >= 10.")
+if (!is.finite(n_examples_each) || n_examples_each < 1) stop("N_EXAMPLES_EACH must be >= 1.")
 
 # -----------------------------
 # Helpers
@@ -34,12 +35,8 @@ normalize_gene_id <- function(x) {
 
 method_candidates <- function(method) {
   out <- method
-  if (str_detect(method, "_irnt$")) {
-    out <- c(out, str_replace(method, "_irnt$", "_inverse_normal"))
-  }
-  if (str_detect(method, "_inverse_normal$")) {
-    out <- c(out, str_replace(method, "_inverse_normal$", "_irnt"))
-  }
+  if (str_detect(method, "_irnt$")) out <- c(out, str_replace(method, "_irnt$", "_inverse_normal"))
+  if (str_detect(method, "_inverse_normal$")) out <- c(out, str_replace(method, "_inverse_normal$", "_irnt"))
   unique(out)
 }
 
@@ -51,10 +48,7 @@ find_run_dir <- function(method) {
     patt <- paste0("^", m, run_suffix, "([_].+)?$")
     tibble(run_dir = all_dirs[str_detect(basename(all_dirs), patt)])
   })
-
-  if (nrow(hits) == 0) {
-    stop("No run directory found for method: ", method)
-  }
+  if (nrow(hits) == 0) stop("No run directory found for method: ", method)
 
   valid <- hits %>%
     mutate(
@@ -63,16 +57,10 @@ find_run_dir <- function(method) {
       has_map = map_lgl(data_dir, ~ length(list.files(.x, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE)) > 0)
     ) %>%
     filter(has_pheno, has_map)
+  if (nrow(valid) == 0) stop("Run directory exists but phenotype/map files are missing for method: ", method)
 
-  if (nrow(valid) == 0) {
-    stop("Run directory exists but phenotype/map files are missing for method: ", method)
-  }
-
-  exact <- valid %>%
-    filter(basename(run_dir) == paste0(method, run_suffix))
-  if (nrow(exact) > 0) {
-    return(exact$run_dir[[1]])
-  }
+  exact <- valid %>% filter(basename(run_dir) == paste0(method, run_suffix))
+  if (nrow(exact) > 0) return(exact$run_dir[[1]])
 
   valid %>%
     mutate(mtime = file.info(run_dir)$mtime) %>%
@@ -90,31 +78,21 @@ read_expression_matrix <- function(method) {
 
   pheno <- fread(pheno_file, header = FALSE, sep = "\t", data.table = TRUE)
   map_dt <- fread(map_file, sep = "\t", data.table = TRUE)
-
-  if (!all(c("gene_name", "mpheno_index") %in% names(map_dt))) {
-    stop("Unexpected map format: ", map_file)
-  }
+  if (!all(c("gene_name", "mpheno_index") %in% names(map_dt))) stop("Unexpected map format: ", map_file)
 
   map_dt <- map_dt[order(as.integer(mpheno_index))]
   genes <- normalize_gene_id(map_dt$gene_name)
-
-  if ((ncol(pheno) - 2L) != length(genes)) {
-    stop("Phenotype/map dimensions mismatch for run: ", run_dir)
-  }
+  if ((ncol(pheno) - 2L) != length(genes)) stop("Phenotype/map dimensions mismatch for run: ", run_dir)
 
   expr <- as.matrix(pheno[, -(1:2), with = FALSE])
   storage.mode(expr) <- "numeric"
   rownames(expr) <- paste0(as.character(pheno[[1]]), "::", as.character(pheno[[2]]))
 
-  # Collapse duplicate gene IDs by averaging columns.
   if (anyDuplicated(genes) > 0L) {
     idx <- split(seq_along(genes), genes)
-    expr <- do.call(
-      cbind,
-      lapply(idx, function(ii) {
-        if (length(ii) == 1L) expr[, ii] else rowMeans(expr[, ii, drop = FALSE], na.rm = TRUE)
-      })
-    )
+    expr <- do.call(cbind, lapply(idx, function(ii) {
+      if (length(ii) == 1L) expr[, ii] else rowMeans(expr[, ii, drop = FALSE], na.rm = TRUE)
+    }))
     colnames(expr) <- names(idx)
   } else {
     colnames(expr) <- genes
@@ -125,74 +103,81 @@ read_expression_matrix <- function(method) {
 
 skewness_third_moment <- function(x) {
   x <- x[is.finite(x)]
-  n <- length(x)
-  if (n < 3) return(NA_real_)
+  if (length(x) < 3) return(NA_real_)
   mu <- mean(x)
   s <- sd(x)
   if (!is.finite(s) || s == 0) return(NA_real_)
   mean(((x - mu) / s)^3)
 }
 
-pick_quantile_genes <- function(skew_tbl, n_pick = 12L) {
-  q_targets <- quantile(
-    skew_tbl$skewness,
-    probs = seq(0.05, 0.95, length.out = n_pick),
-    na.rm = TRUE,
-    names = FALSE
-  )
+resolve_gene_ids_for_run <- function(gene_raw, run_dir) {
+  gene_chr <- as.character(gene_raw)
+  idx_mask <- str_detect(str_trim(gene_chr), "^[0-9]+$")
+  if (mean(idx_mask, na.rm = TRUE) < 0.8) return(normalize_gene_id(gene_chr))
 
-  chosen <- character(0)
-  out <- vector("list", length(q_targets))
+  map_file <- list.files(file.path(run_dir, "results", "data"), pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE)
+  if (length(map_file) == 0) return(normalize_gene_id(gene_chr))
 
-  for (i in seq_along(q_targets)) {
-    qv <- q_targets[i]
-    cand <- skew_tbl %>%
-      filter(!Gene %in% chosen) %>%
-      mutate(dist_q = abs(skewness - qv)) %>%
-      arrange(dist_q) %>%
-      slice(1)
-    chosen <- c(chosen, cand$Gene)
-    out[[i]] <- cand
-  }
+  map_dt <- fread(map_file[1], sep = "\t", data.table = TRUE)
+  if (!all(c("gene_name", "mpheno_index") %in% names(map_dt))) return(normalize_gene_id(gene_chr))
 
-  bind_rows(out) %>%
-    mutate(rank_id = row_number())
+  map_tbl <- map_dt %>%
+    transmute(mpheno_index = as.integer(mpheno_index), gene_name = as.character(gene_name))
+
+  idx_tbl <- tibble(
+    row_id = seq_along(gene_chr),
+    mpheno_index = suppressWarnings(as.integer(gene_chr))
+  ) %>%
+    left_join(map_tbl, by = "mpheno_index")
+
+  resolved <- gene_chr
+  replace_mask <- idx_mask & !is.na(idx_tbl$gene_name)
+  resolved[replace_mask] <- idx_tbl$gene_name[replace_mask]
+  normalize_gene_id(resolved)
+}
+
+read_h2_summary <- function(method) {
+  run_dir <- find_run_dir(method)
+  sum_file <- list.files(file.path(run_dir, "results", "summary"), pattern = "^final_heritability_summary.*\\.tsv$", full.names = TRUE)
+  if (length(sum_file) == 0) stop("Missing summary for method: ", method)
+
+  dt <- fread(sum_file[1], sep = "\t", data.table = TRUE)
+  tibble(
+    Gene = resolve_gene_ids_for_run(dt$Gene, run_dir),
+    Status = toupper(str_trim(as.character(dt$Status))),
+    h2 = suppressWarnings(as.numeric(dt$h2_GREML))
+  ) %>%
+    filter(is.finite(h2))
 }
 
 # -----------------------------
-# Compute skewness on random sample of genes
+# Compute skewness on random 2000 genes
 # -----------------------------
-obj <- read_expression_matrix(method_id)
-expr <- obj$expr
-all_genes <- colnames(expr)
-
-if (length(all_genes) < 50) {
-  stop("Too few genes found in matrix.")
-}
+tmm_obj <- read_expression_matrix(method_id)
+tmm_expr <- tmm_obj$expr
+all_genes <- colnames(tmm_expr)
+if (length(all_genes) < 50) stop("Too few genes found in matrix.")
 
 set.seed(rng_seed)
 n_take <- min(n_sample_genes, length(all_genes))
 sampled_genes <- sample(all_genes, size = n_take, replace = FALSE)
-expr_sub <- expr[, sampled_genes, drop = FALSE]
+tmm_sub <- tmm_expr[, sampled_genes, drop = FALSE]
 
 skew_tbl <- tibble(
   Gene = sampled_genes,
-  mean_expr = colMeans(expr_sub, na.rm = TRUE),
-  median_expr = apply(expr_sub, 2, median, na.rm = TRUE),
-  sd_expr = apply(expr_sub, 2, sd, na.rm = TRUE),
-  skewness = apply(expr_sub, 2, skewness_third_moment)
+  mean_expr = colMeans(tmm_sub, na.rm = TRUE),
+  median_expr = apply(tmm_sub, 2, median, na.rm = TRUE),
+  sd_expr = apply(tmm_sub, 2, sd, na.rm = TRUE),
+  skewness = apply(tmm_sub, 2, skewness_third_moment)
 ) %>%
   filter(is.finite(skewness))
-
-if (nrow(skew_tbl) == 0) {
-  stop("No finite skewness values were computed.")
-}
+if (nrow(skew_tbl) == 0) stop("No finite skewness values were computed.")
 
 summary_tbl <- skew_tbl %>%
   summarise(
     method = method_id,
-    run_dir = obj$run_dir,
-    n_individuals = nrow(expr_sub),
+    run_dir = tmm_obj$run_dir,
+    n_individuals = nrow(tmm_sub),
     n_genes_requested = n_sample_genes,
     n_genes_used = nrow(skew_tbl),
     mean_skewness = mean(skewness, na.rm = TRUE),
@@ -203,14 +188,17 @@ summary_tbl <- skew_tbl %>%
   )
 
 # -----------------------------
-# Outputs
+# Output paths
 # -----------------------------
 slug <- str_replace_all(method_id, "[^A-Za-z0-9_]+", "_")
 out_gene <- file.path(runs_dir, paste0("tmm_raw_skewness_gene_table_", slug, ".tsv"))
 out_summary <- file.path(runs_dir, paste0("tmm_raw_skewness_summary_", slug, ".tsv"))
 out_hist <- file.path(runs_dir, paste0("tmm_raw_skewness_hist_density_", slug, ".png"))
 out_scatter <- file.path(runs_dir, paste0("tmm_raw_skewness_mean_vs_skew_", slug, ".png"))
-out_examples <- file.path(runs_dir, paste0("tmm_raw_skewness_example_gene_distributions_", slug, ".png"))
+out_skew_examples_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_genes_", slug, ".tsv"))
+out_skew_examples_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
+out_h2_examples_tsv <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
+out_h2_examples_plot <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
 
 write_tsv(skew_tbl, out_gene)
 write_tsv(summary_tbl, out_summary)
@@ -222,16 +210,12 @@ p_hist <- ggplot(skew_tbl, aes(x = skewness)) +
   geom_vline(xintercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
   labs(
     title = paste0("Gene-wise skewness (third moment) - ", method_id),
-    subtitle = paste0("Random sample of ", nrow(skew_tbl), " genes; values across individuals"),
+    subtitle = paste0("Random sample of ", nrow(skew_tbl), " genes"),
     x = "Skewness",
     y = "Density"
   ) +
   theme_minimal(base_size = 12) +
-  theme(
-    panel.grid.minor = element_blank(),
-    plot.title = element_text(face = "bold")
-  )
-
+  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"))
 ggsave(out_hist, p_hist, width = 10, height = 5, dpi = 300)
 
 # 2) Mean expression vs skewness
@@ -246,49 +230,131 @@ p_scatter <- ggplot(skew_tbl, aes(x = log2(mean_expr + 1), y = skewness)) +
     y = "Skewness (third moment)"
   ) +
   theme_minimal(base_size = 12) +
-  theme(
-    panel.grid.minor = element_blank(),
-    plot.title = element_text(face = "bold")
-  )
-
+  theme(panel.grid.minor = element_blank(), plot.title = element_text(face = "bold"))
 ggsave(out_scatter, p_scatter, width = 9, height = 5.5, dpi = 300)
 
-# 3) Distribution across individuals for representative genes
-example_genes <- pick_quantile_genes(skew_tbl, n_pick = n_example_genes)
-expr_example <- as_tibble(expr_sub[, example_genes$Gene, drop = FALSE]) %>%
-  mutate(sample_id = rownames(expr_sub)) %>%
+# 3) Requested skewness examples: high+, low-, near zero
+sel_high <- skew_tbl %>%
+  arrange(desc(skewness)) %>%
+  slice_head(n = n_examples_each) %>%
+  mutate(group = "High positive skew")
+sel_low <- skew_tbl %>%
+  arrange(skewness) %>%
+  slice_head(n = n_examples_each) %>%
+  mutate(group = "Low negative skew")
+sel_zero <- skew_tbl %>%
+  mutate(abs_skew = abs(skewness)) %>%
+  arrange(abs_skew) %>%
+  slice_head(n = n_examples_each) %>%
+  select(-abs_skew) %>%
+  mutate(group = "Near zero skew")
+
+skew_examples <- bind_rows(sel_high, sel_low, sel_zero) %>%
+  distinct(Gene, .keep_all = TRUE) %>%
+  mutate(rank_id = row_number())
+
+write_tsv(skew_examples, out_skew_examples_tsv)
+
+skew_plot_df <- as_tibble(tmm_sub[, skew_examples$Gene, drop = FALSE]) %>%
+  mutate(sample_id = rownames(tmm_sub)) %>%
   pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
-  left_join(example_genes %>% select(Gene, skewness, mean_expr, rank_id), by = "Gene") %>%
+  left_join(skew_examples %>% select(Gene, skewness, group, rank_id), by = "Gene") %>%
   mutate(
-    facet_label = paste0(
-      "Q", rank_id,
-      "\n", Gene,
-      "\nskew=", sprintf("%.2f", skewness)
-    ),
+    facet_label = paste0(group, "\n", Gene, "\nskew=", sprintf("%.2f", skewness)),
     facet_label = factor(facet_label, levels = unique(facet_label[order(rank_id)]))
   )
 
-p_examples <- ggplot(expr_example, aes(x = expr)) +
+p_skew_examples <- ggplot(skew_plot_df, aes(x = expr)) +
   geom_histogram(bins = 40, fill = "#4DB6AC", color = "white", alpha = 0.9) +
-  facet_wrap(~ facet_label, scales = "free_y", ncol = 4) +
+  facet_wrap(~ facet_label, scales = "free_y", ncol = 3) +
   labs(
-    title = paste0("Expression distribution across individuals - ", method_id),
-    subtitle = "Representative genes spanning skewness quantiles",
+    title = paste0("Selected skewness example genes - ", method_id),
+    subtitle = "TMM RAW expression distribution across individuals",
     x = "Expression value (post-PEER phenotype values)",
     y = "Number of individuals"
   ) +
   theme_minimal(base_size = 10.5) +
-  theme(
-    panel.grid.minor = element_blank(),
-    strip.text = element_text(face = "bold", size = 8)
-  )
+  theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold", size = 8))
+ggsave(out_skew_examples_plot, p_skew_examples, width = 13, height = 8, dpi = 300)
 
-ggsave(out_examples, p_examples, width = 13, height = 8, dpi = 300)
+# 4) Requested TPM vs TMM h2 discrepancy examples
+method_match <- str_match(method_id, "^(all_snps|hm3_no_mhc)_tmm_raw$")
+if (!is.na(method_match[1, 2])) {
+  snp_set <- method_match[1, 2]
+  tpm_method <- paste0(snp_set, "_tpm_raw")
+
+  h2_tmm <- read_h2_summary(method_id) %>% filter(Status == "PASS") %>% select(Gene, h2_tmm = h2)
+  h2_tpm <- read_h2_summary(tpm_method) %>% filter(Status == "PASS") %>% select(Gene, h2_tpm = h2)
+  h2_join <- h2_tmm %>% inner_join(h2_tpm, by = "Gene")
+
+  tpm_high <- h2_join %>%
+    filter(h2_tpm > h2_hi_cutoff, h2_tmm < h2_lo_cutoff) %>%
+    arrange(desc(h2_tpm - h2_tmm)) %>%
+    slice_head(n = n_examples_each) %>%
+    mutate(group = "TPM high, TMM near-zero")
+
+  tmm_high <- h2_join %>%
+    filter(h2_tmm > h2_hi_cutoff, h2_tpm < h2_lo_cutoff) %>%
+    arrange(desc(h2_tmm - h2_tpm)) %>%
+    slice_head(n = n_examples_each) %>%
+    mutate(group = "TMM high, TPM near-zero")
+
+  h2_examples <- bind_rows(tpm_high, tmm_high) %>%
+    distinct(Gene, .keep_all = TRUE) %>%
+    left_join(skew_tbl %>% select(Gene, skewness, mean_expr), by = "Gene")
+
+  write_tsv(h2_examples, out_h2_examples_tsv)
+
+  if (nrow(h2_examples) > 0) {
+    tpm_obj <- read_expression_matrix(tpm_method)
+    common_samples <- intersect(rownames(tmm_obj$expr), rownames(tpm_obj$expr))
+    common_genes <- intersect(h2_examples$Gene, intersect(colnames(tmm_obj$expr), colnames(tpm_obj$expr)))
+
+    if (length(common_samples) >= 3 && length(common_genes) > 0) {
+      tmm_long <- as_tibble(tmm_obj$expr[common_samples, common_genes, drop = FALSE]) %>%
+        mutate(sample_id = common_samples) %>%
+        pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
+        mutate(method = "TMM RAW")
+      tpm_long <- as_tibble(tpm_obj$expr[common_samples, common_genes, drop = FALSE]) %>%
+        mutate(sample_id = common_samples) %>%
+        pivot_longer(cols = -sample_id, names_to = "Gene", values_to = "expr") %>%
+        mutate(method = "TPM RAW")
+
+      h2_plot_df <- bind_rows(tmm_long, tpm_long) %>%
+        left_join(h2_examples, by = "Gene") %>%
+        mutate(facet_label = paste0(group, "\n", Gene, "\nTMM h2=", sprintf("%.3f", h2_tmm), ", TPM h2=", sprintf("%.3f", h2_tpm)))
+
+      p_h2_examples <- ggplot(h2_plot_df, aes(x = expr, color = method, fill = method)) +
+        geom_density(alpha = 0.15, linewidth = 0.7) +
+        facet_wrap(~ facet_label, scales = "free_y", ncol = 2) +
+        scale_color_manual(values = c("TMM RAW" = "#1F78B4", "TPM RAW" = "#D95F02")) +
+        scale_fill_manual(values = c("TMM RAW" = "#1F78B4", "TPM RAW" = "#D95F02")) +
+        labs(
+          title = paste0("Expression distributions for h2-discrepant genes - ", snp_set, " RAW"),
+          subtitle = "Near-zero vs high h2 between TPM and TMM",
+          x = "Expression value (post-PEER phenotype values)",
+          y = "Density",
+          color = NULL,
+          fill = NULL
+        ) +
+        theme_minimal(base_size = 10.5) +
+        theme(panel.grid.minor = element_blank(), strip.text = element_text(face = "bold", size = 8), legend.position = "top")
+
+      ggsave(out_h2_examples_plot, p_h2_examples, width = 13, height = 8.5, dpi = 300)
+    }
+  }
+} else {
+  write_tsv(tibble(), out_h2_examples_tsv)
+  message("Skipping h2-discrepancy example selection because METHOD_ID is not *_tmm_raw.")
+}
 
 cat("Saved:\n")
 cat("- ", out_gene, "\n", sep = "")
 cat("- ", out_summary, "\n", sep = "")
 cat("- ", out_hist, "\n", sep = "")
 cat("- ", out_scatter, "\n", sep = "")
-cat("- ", out_examples, "\n", sep = "")
+cat("- ", out_skew_examples_tsv, "\n", sep = "")
+cat("- ", out_skew_examples_plot, "\n", sep = "")
+cat("- ", out_h2_examples_tsv, "\n", sep = "")
+cat("- ", out_h2_examples_plot, "\n", sep = "")
 
