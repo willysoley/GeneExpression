@@ -13,6 +13,7 @@ run_suffix <- "_peerauto_pmg0_npc5"
 out_gene <- file.path(runs_dir, "tpm_tmm_peer_gene_correlations.tsv")
 out_summary <- file.path(runs_dir, "tpm_tmm_peer_correlation_summary.tsv")
 out_plot <- file.path(runs_dir, "tpm_tmm_peer_correlation_boxplot.png")
+out_scatter <- file.path(runs_dir, "tpm_tmm_peer_mean_scatter.png")
 
 # -----------------------------
 # Helpers
@@ -211,8 +212,32 @@ p <- ggplot(plot_df, aes(x = cor_tpm_vs_tmm, y = panel, fill = panel)) +
 
 ggsave(out_plot, p, width = 10, height = 4.8, dpi = 300)
 
+# Per-gene mean expression scatter: TMM on X, TPM on Y
+scatter_df <- cor_df %>%
+  mutate(panel = factor(panel, levels = panel_order))
+
+p_scatter <- ggplot(scatter_df, aes(x = mean_tmm, y = mean_tpm)) +
+  geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
+  geom_point(alpha = 0.18, size = 0.6, color = "#2A9D8F") +
+  geom_smooth(method = "lm", se = FALSE, color = "#264653", linewidth = 0.55) +
+  facet_wrap(~panel, scales = "free", ncol = 2) +
+  labs(
+    title = "Per-gene Mean Expression: TPM vs TMM (post-PEER)",
+    subtitle = "X-axis: mean TMM across individuals | Y-axis: mean TPM across individuals",
+    x = "Mean TMM (per gene)",
+    y = "Mean TPM (per gene)"
+  ) +
+  theme_minimal(base_size = 12) +
+  theme(
+    panel.grid.minor = element_blank(),
+    strip.text = element_text(face = "bold"),
+    plot.title = element_text(face = "bold")
+  )
+
+ggsave(out_scatter, p_scatter, width = 10, height = 8, dpi = 300)
+
 cat("Saved:\n")
 cat("- ", out_gene, "\n", sep = "")
 cat("- ", out_summary, "\n", sep = "")
 cat("- ", out_plot, "\n", sep = "")
-
+cat("- ", out_scatter, "\n", sep = "")
