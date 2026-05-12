@@ -218,6 +218,7 @@ out_skew_examples_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_g
 out_skew_examples_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
 out_h2_examples_tsv <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
 out_h2_examples_plot <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
+out_all_vs_hm3_tmm_raw_skew_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness.png")
 
 write_tsv(skew_tbl, out_gene)
 write_tsv(summary_tbl, out_summary)
@@ -428,6 +429,72 @@ if (!is.na(method_match[1, 2])) {
   message("Skipping h2-discrepancy example selection because METHOD_ID is not *_tmm_raw.")
 }
 
+# 5) ALL raw h2 vs HM3 raw h2 (TMM), colored by skewness
+all_method <- "all_snps_tmm_raw"
+hm3_method <- "hm3_no_mhc_tmm_raw"
+
+h2_all_tmm_raw <- read_h2_summary(all_method) %>%
+  filter(Status == "PASS") %>%
+  select(Gene, h2_all_raw_tmm = h2)
+h2_hm3_tmm_raw <- read_h2_summary(hm3_method) %>%
+  filter(Status == "PASS") %>%
+  select(Gene, h2_hm3_raw_tmm = h2)
+
+all_expr_obj <- read_expression_matrix(all_method)
+all_skew_tbl <- tibble(
+  Gene = colnames(all_expr_obj$expr),
+  skewness_tmm_raw = apply(all_expr_obj$expr, 2, skewness_third_moment)
+) %>%
+  filter(is.finite(skewness_tmm_raw))
+
+all_vs_hm3_plot_df <- h2_all_tmm_raw %>%
+  inner_join(h2_hm3_tmm_raw, by = "Gene") %>%
+  inner_join(all_skew_tbl, by = "Gene") %>%
+  mutate(
+    skewness_for_color = pmin(pmax(skewness_tmm_raw, 0), 50)
+  )
+
+if (nrow(all_vs_hm3_plot_df) > 0) {
+  lower_breaks <- c(0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0)
+
+  p_all_vs_hm3 <- ggplot(all_vs_hm3_plot_df, aes(x = h2_all_raw_tmm, y = h2_hm3_raw_tmm, color = skewness_for_color)) +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
+    geom_point(alpha = 0.35, size = 0.9) +
+    scale_x_continuous(
+      trans = scales::pseudo_log_trans(sigma = 0.005),
+      breaks = lower_breaks,
+      minor_breaks = NULL
+    ) +
+    scale_y_continuous(
+      trans = scales::pseudo_log_trans(sigma = 0.005),
+      breaks = lower_breaks,
+      minor_breaks = NULL
+    ) +
+    scale_color_viridis_c(
+      option = "magma",
+      limits = c(0, 50),
+      oob = scales::squish,
+      trans = scales::pseudo_log_trans(sigma = 0.25),
+      breaks = c(0, 0.25, 0.5, 1, 2, 5, 10, 20, 50),
+      name = "Skewness\n(capped at 50)"
+    ) +
+    labs(
+      title = "ALL raw h2 vs HM3 raw h2 (TMM)",
+      subtitle = "Color = gene-level skewness in ALL TMM RAW (higher-end capped at 50)",
+      x = "ALL raw h2 (TMM)",
+      y = "HM3 raw h2 (TMM)"
+    ) +
+    theme_minimal(base_size = 12) +
+    theme(
+      panel.grid.minor = element_line(color = "grey90", linewidth = 0.25),
+      panel.grid.major = element_line(color = "grey82", linewidth = 0.35),
+      legend.position = "right",
+      plot.title = element_text(face = "bold")
+    )
+
+  ggsave(out_all_vs_hm3_tmm_raw_skew_plot, p_all_vs_hm3, width = 8.8, height = 7, dpi = 320)
+}
+
 cat("Saved:\n")
 cat("- ", out_gene, "\n", sep = "")
 cat("- ", out_summary, "\n", sep = "")
@@ -437,4 +504,4 @@ cat("- ", out_skew_examples_tsv, "\n", sep = "")
 cat("- ", out_skew_examples_plot, "\n", sep = "")
 cat("- ", out_h2_examples_tsv, "\n", sep = "")
 cat("- ", out_h2_examples_plot, "\n", sep = "")
-
+cat("- ", out_all_vs_hm3_tmm_raw_skew_plot, "\n", sep = "")
