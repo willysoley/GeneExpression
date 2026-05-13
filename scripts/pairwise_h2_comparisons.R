@@ -22,6 +22,7 @@ include_mixed <- FALSE
 # "strict" -> require PASS finite intersections
 # "any_finite" -> always use any finite h2
 fallback_strategy <- "auto"
+log_expr_caps <- c(5, 8)
 
 # -----------------------------
 # Helpers
@@ -687,13 +688,23 @@ calc_stats <- function(df) {
     )
 }
 
-plot_section <- function(df, title, subtitle_text, x_lab, y_lab, out_file, color_var, color_label, color_mode = c("seq", "div")) {
+plot_section <- function(df, title, subtitle_text, x_lab, y_lab, out_file, color_var, color_label, color_mode = c("seq", "div"), color_cap = NA_real_) {
   if (nrow(df) == 0) return(invisible(NULL))
   color_mode <- match.arg(color_mode)
   stats <- calc_stats(df)
+  plot_df <- df
+  color_col <- color_var
+  color_label_use <- color_label
 
-  p <- df %>%
-    ggplot(aes(x = x_plot, y = y_plot, color = .data[[color_var]])) +
+  if (color_mode == "seq" && is.finite(color_cap)) {
+    plot_df <- plot_df %>%
+      mutate(.color_capped = pmin(pmax(.data[[color_var]], 0), color_cap))
+    color_col <- ".color_capped"
+    color_label_use <- paste0(color_label, "\n(capped at ", color_cap, ")")
+  }
+
+  p <- plot_df %>%
+    ggplot(aes(x = x_plot, y = y_plot, color = .data[[color_col]])) +
     geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.35) +
     geom_point(alpha = 0.4, size = 0.7) +
     geom_text(
@@ -711,7 +722,7 @@ plot_section <- function(df, title, subtitle_text, x_lab, y_lab, out_file, color
       subtitle = subtitle_text,
       x = x_lab,
       y = y_lab,
-      color = color_label
+      color = color_label_use
     ) +
     theme_minimal(base_size = 10.5) +
     theme(
@@ -720,7 +731,16 @@ plot_section <- function(df, title, subtitle_text, x_lab, y_lab, out_file, color
     )
 
   if (color_mode == "seq") {
-    p <- p + scale_color_viridis_c(option = "magma", na.value = "grey80")
+    if (is.finite(color_cap)) {
+      p <- p + scale_color_viridis_c(
+        option = "magma",
+        limits = c(0, color_cap),
+        oob = scales::squish,
+        na.value = "grey80"
+      )
+    } else {
+      p <- p + scale_color_viridis_c(option = "magma", na.value = "grey80")
+    }
   } else {
     p <- p + scale_color_gradient2(
       low = "#3B4CC0",
@@ -820,29 +840,33 @@ plot_section(
   color_mode = "seq"
 )
 
-plot_section(
-  expr_df,
-  title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
-  subtitle_text = plot_subtitle,
-  x_lab = "X-axis h2 (TMM)",
-  y_lab = "Y-axis h2 (TPM)",
-  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")),
-  color_var = "log_expr_plot",
-  color_label = "log2(mean expr + 1)",
-  color_mode = "seq"
-)
+for (cap in log_expr_caps) {
+  plot_section(
+    expr_df,
+    title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
+    subtitle_text = paste0(plot_subtitle, " | color cap=", cap),
+    x_lab = "X-axis h2 (TMM)",
+    y_lab = "Y-axis h2 (TPM)",
+    out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap", cap, ".png")),
+    color_var = "log_expr_plot",
+    color_label = "log2(mean expr + 1)",
+    color_mode = "seq",
+    color_cap = cap
+  )
 
-plot_section(
-  norm_df,
-  title = "Pairwise GREML h2: Normalization effect (RAW vs IRNT)",
-  subtitle_text = plot_subtitle,
-  x_lab = "X-axis h2 (RAW)",
-  y_lab = "Y-axis h2 (IRNT)",
-  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")),
-  color_var = "log_expr_plot",
-  color_label = "log2(mean expr + 1)",
-  color_mode = "seq"
-)
+  plot_section(
+    norm_df,
+    title = "Pairwise GREML h2: Normalization effect (RAW vs IRNT)",
+    subtitle_text = paste0(plot_subtitle, " | color cap=", cap),
+    x_lab = "X-axis h2 (RAW)",
+    y_lab = "Y-axis h2 (IRNT)",
+    out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap", cap, ".png")),
+    color_var = "log_expr_plot",
+    color_label = "log2(mean expr + 1)",
+    color_mode = "seq",
+    color_cap = cap
+  )
+}
 
 # 6B) Color by heritability significance proxy (Wald Z)
 plot_section(
@@ -891,8 +915,10 @@ plot_tpm_tmm_correlation(
 
 cat("Saved grouped plots and stats:\n")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")), "\n", sep = "")
-cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")), "\n", sep = "")
-cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap5.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap8.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap5.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap8.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_zscore.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")), "\n", sep = "")
