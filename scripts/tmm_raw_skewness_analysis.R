@@ -218,7 +218,10 @@ out_skew_examples_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_g
 out_skew_examples_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
 out_h2_examples_tsv <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
 out_h2_examples_plot <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
-out_all_vs_hm3_tmm_raw_skew_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness.png")
+out_all_vs_hm3_tmm_raw_logexpr_cap5_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_log2meanexpr_cap5.png")
+out_all_vs_hm3_tmm_raw_logexpr_cap8_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_log2meanexpr_cap8.png")
+out_all_vs_hm3_tmm_raw_skew_cap2_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness_cap2.png")
+out_all_vs_hm3_tmm_raw_skew_cap5_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness_cap5.png")
 
 write_tsv(skew_tbl, out_gene)
 write_tsv(summary_tbl, out_summary)
@@ -429,7 +432,7 @@ if (!is.na(method_match[1, 2])) {
   message("Skipping h2-discrepancy example selection because METHOD_ID is not *_tmm_raw.")
 }
 
-# 5) ALL raw h2 vs HM3 raw h2 (TMM), colored by skewness
+# 5) ALL raw h2 vs HM3 raw h2 (TMM), colored by log2 mean expression and skewness with caps
 all_method <- "all_snps_tmm_raw"
 hm3_method <- "hm3_no_mhc_tmm_raw"
 
@@ -441,58 +444,110 @@ h2_hm3_tmm_raw <- read_h2_summary(hm3_method) %>%
   select(Gene, h2_hm3_raw_tmm = h2)
 
 all_expr_obj <- read_expression_matrix(all_method)
-all_skew_tbl <- tibble(
+all_metric_tbl <- tibble(
   Gene = colnames(all_expr_obj$expr),
+  log2_mean_expr_tmm_raw = log2(colMeans(all_expr_obj$expr, na.rm = TRUE) + 1),
   skewness_tmm_raw = apply(all_expr_obj$expr, 2, skewness_third_moment)
 ) %>%
-  filter(is.finite(skewness_tmm_raw))
+  filter(is.finite(skewness_tmm_raw), is.finite(log2_mean_expr_tmm_raw))
 
 all_vs_hm3_plot_df <- h2_all_tmm_raw %>%
   inner_join(h2_hm3_tmm_raw, by = "Gene") %>%
-  inner_join(all_skew_tbl, by = "Gene") %>%
-  mutate(
-    skewness_for_color = pmin(pmax(skewness_tmm_raw, 0), 50)
-  )
+  inner_join(all_metric_tbl, by = "Gene")
 
 if (nrow(all_vs_hm3_plot_df) > 0) {
   lower_breaks <- c(0, 0.001, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0)
 
-  p_all_vs_hm3 <- ggplot(all_vs_hm3_plot_df, aes(x = h2_all_raw_tmm, y = h2_hm3_raw_tmm, color = skewness_for_color)) +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
-    geom_point(alpha = 0.35, size = 0.9) +
-    scale_x_continuous(
-      trans = scales::pseudo_log_trans(sigma = 0.005),
-      breaks = lower_breaks,
-      minor_breaks = NULL
-    ) +
-    scale_y_continuous(
-      trans = scales::pseudo_log_trans(sigma = 0.005),
-      breaks = lower_breaks,
-      minor_breaks = NULL
-    ) +
+  base_h2_scatter <- function(df) {
+    ggplot(df, aes(x = h2_all_raw_tmm, y = h2_hm3_raw_tmm)) +
+      geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#E76F51", linewidth = 0.4) +
+      geom_point(alpha = 0.35, size = 0.9) +
+      scale_x_continuous(
+        trans = scales::pseudo_log_trans(sigma = 0.005),
+        breaks = lower_breaks,
+        minor_breaks = NULL
+      ) +
+      scale_y_continuous(
+        trans = scales::pseudo_log_trans(sigma = 0.005),
+        breaks = lower_breaks,
+        minor_breaks = NULL
+      ) +
+      labs(
+        title = "ALL raw h2 vs HM3 raw h2 (TMM)",
+        x = "ALL raw h2 (TMM)",
+        y = "HM3 raw h2 (TMM)"
+      ) +
+      theme_minimal(base_size = 12) +
+      theme(
+        panel.grid.minor = element_line(color = "grey90", linewidth = 0.25),
+        panel.grid.major = element_line(color = "grey82", linewidth = 0.35),
+        legend.position = "right",
+        plot.title = element_text(face = "bold")
+      )
+  }
+
+  # Log2 mean expression caps at 5 and 8
+  p_logexpr_cap5 <- all_vs_hm3_plot_df %>%
+    mutate(color_cap = pmin(log2_mean_expr_tmm_raw, 5)) %>%
+    base_h2_scatter() +
+    aes(color = color_cap) +
     scale_color_viridis_c(
       option = "magma",
-      limits = c(0, 50),
+      limits = c(0, 5),
       oob = scales::squish,
-      trans = scales::pseudo_log_trans(sigma = 0.25),
-      breaks = c(0, 0.25, 0.5, 1, 2, 5, 10, 20, 50),
-      name = "Skewness\n(capped at 50)"
+      trans = scales::pseudo_log_trans(sigma = 0.10),
+      breaks = c(0, 0.25, 0.5, 1, 2, 3, 4, 5),
+      name = "log2(mean expr+1)\n(capped at 5)"
     ) +
-    labs(
-      title = "ALL raw h2 vs HM3 raw h2 (TMM)",
-      subtitle = "Color = gene-level skewness in ALL TMM RAW (higher-end capped at 50)",
-      x = "ALL raw h2 (TMM)",
-      y = "HM3 raw h2 (TMM)"
-    ) +
-    theme_minimal(base_size = 12) +
-    theme(
-      panel.grid.minor = element_line(color = "grey90", linewidth = 0.25),
-      panel.grid.major = element_line(color = "grey82", linewidth = 0.35),
-      legend.position = "right",
-      plot.title = element_text(face = "bold")
-    )
+    labs(subtitle = "Color = log2(mean expression + 1), values >5 shown as same color")
 
-  ggsave(out_all_vs_hm3_tmm_raw_skew_plot, p_all_vs_hm3, width = 8.8, height = 7, dpi = 320)
+  p_logexpr_cap8 <- all_vs_hm3_plot_df %>%
+    mutate(color_cap = pmin(log2_mean_expr_tmm_raw, 8)) %>%
+    base_h2_scatter() +
+    aes(color = color_cap) +
+    scale_color_viridis_c(
+      option = "magma",
+      limits = c(0, 8),
+      oob = scales::squish,
+      trans = scales::pseudo_log_trans(sigma = 0.10),
+      breaks = c(0, 0.25, 0.5, 1, 2, 3, 4, 5, 6, 8),
+      name = "log2(mean expr+1)\n(capped at 8)"
+    ) +
+    labs(subtitle = "Color = log2(mean expression + 1), values >8 shown as same color")
+
+  # Skewness caps at 2 and 5
+  p_skew_cap2 <- all_vs_hm3_plot_df %>%
+    mutate(color_cap = pmin(pmax(skewness_tmm_raw, 0), 2)) %>%
+    base_h2_scatter() +
+    aes(color = color_cap) +
+    scale_color_viridis_c(
+      option = "magma",
+      limits = c(0, 2),
+      oob = scales::squish,
+      trans = scales::pseudo_log_trans(sigma = 0.10),
+      breaks = c(0, 0.10, 0.25, 0.5, 1, 1.5, 2),
+      name = "Skewness\n(capped at 2)"
+    ) +
+    labs(subtitle = "Color = gene-level skewness in ALL TMM RAW, values >2 shown as same color")
+
+  p_skew_cap5 <- all_vs_hm3_plot_df %>%
+    mutate(color_cap = pmin(pmax(skewness_tmm_raw, 0), 5)) %>%
+    base_h2_scatter() +
+    aes(color = color_cap) +
+    scale_color_viridis_c(
+      option = "magma",
+      limits = c(0, 5),
+      oob = scales::squish,
+      trans = scales::pseudo_log_trans(sigma = 0.15),
+      breaks = c(0, 0.10, 0.25, 0.5, 1, 2, 3, 5),
+      name = "Skewness\n(capped at 5)"
+    ) +
+    labs(subtitle = "Color = gene-level skewness in ALL TMM RAW, values >5 shown as same color")
+
+  ggsave(out_all_vs_hm3_tmm_raw_logexpr_cap5_plot, p_logexpr_cap5, width = 8.8, height = 7, dpi = 320)
+  ggsave(out_all_vs_hm3_tmm_raw_logexpr_cap8_plot, p_logexpr_cap8, width = 8.8, height = 7, dpi = 320)
+  ggsave(out_all_vs_hm3_tmm_raw_skew_cap2_plot, p_skew_cap2, width = 8.8, height = 7, dpi = 320)
+  ggsave(out_all_vs_hm3_tmm_raw_skew_cap5_plot, p_skew_cap5, width = 8.8, height = 7, dpi = 320)
 }
 
 cat("Saved:\n")
@@ -504,4 +559,7 @@ cat("- ", out_skew_examples_tsv, "\n", sep = "")
 cat("- ", out_skew_examples_plot, "\n", sep = "")
 cat("- ", out_h2_examples_tsv, "\n", sep = "")
 cat("- ", out_h2_examples_plot, "\n", sep = "")
-cat("- ", out_all_vs_hm3_tmm_raw_skew_plot, "\n", sep = "")
+cat("- ", out_all_vs_hm3_tmm_raw_logexpr_cap5_plot, "\n", sep = "")
+cat("- ", out_all_vs_hm3_tmm_raw_logexpr_cap8_plot, "\n", sep = "")
+cat("- ", out_all_vs_hm3_tmm_raw_skew_cap2_plot, "\n", sep = "")
+cat("- ", out_all_vs_hm3_tmm_raw_skew_cap5_plot, "\n", sep = "")
