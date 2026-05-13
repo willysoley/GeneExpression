@@ -22,7 +22,7 @@ include_mixed <- FALSE
 # "strict" -> require PASS finite intersections
 # "any_finite" -> always use any finite h2
 fallback_strategy <- "auto"
-log_expr_caps <- c(5, 8)
+log_expr_caps <- c(1.5, 5, 8)
 
 # -----------------------------
 # Helpers
@@ -915,8 +915,10 @@ plot_tpm_tmm_correlation(
 
 cat("Saved grouped plots and stats:\n")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap1.5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap8.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap1.5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap8.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")), "\n", sep = "")
