@@ -866,6 +866,36 @@ for (cap in log_expr_caps) {
     color_mode = "seq",
     color_cap = cap
   )
+
+  # Extra expression-only views with explicit color source
+  # X-axis is TMM h2 and Y-axis is TPM h2, so:
+  # - log_expr_x corresponds to TMM RAW expression
+  # - log_expr_y corresponds to TPM RAW expression
+  plot_section(
+    expr_df,
+    title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
+    subtitle_text = paste0(plot_subtitle, " | color = TMM RAW log2(mean expr + 1), cap=", cap),
+    x_lab = "X-axis h2 (TMM)",
+    y_lab = "Y-axis h2 (TPM)",
+    out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tmm_cap", cap, ".png")),
+    color_var = "log_expr_x",
+    color_label = "log2(mean expr + 1) | TMM RAW",
+    color_mode = "seq",
+    color_cap = cap
+  )
+
+  plot_section(
+    expr_df,
+    title = "Pairwise GREML h2: Expression effect (TPM vs TMM)",
+    subtitle_text = paste0(plot_subtitle, " | color = TPM RAW log2(mean expr + 1), cap=", cap),
+    x_lab = "X-axis h2 (TMM)",
+    y_lab = "Y-axis h2 (TPM)",
+    out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tpm_cap", cap, ".png")),
+    color_var = "log_expr_y",
+    color_label = "log2(mean expr + 1) | TPM RAW",
+    color_mode = "seq",
+    color_cap = cap
+  )
 }
 
 # 6B) Color by heritability significance proxy (Wald Z)
@@ -918,6 +948,12 @@ cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap1.5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_cap8.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tmm_cap1.5.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tmm_cap5.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tmm_cap8.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tpm_cap1.5.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tpm_cap5.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr_tpm_cap8.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap1.5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap5.png")), "\n", sep = "")
 cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr_cap8.png")), "\n", sep = "")
