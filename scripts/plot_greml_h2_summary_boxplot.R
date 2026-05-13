@@ -8,6 +8,11 @@ suppressPackageStartupMessages({
 # 1) Inputs
 # -----------------------------
 base_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs"
+analysis_root <- file.path(base_dir, "_analysis", "plot_greml_h2_summary_boxplot")
+plots_dir <- file.path(analysis_root, "plots")
+tables_dir <- file.path(analysis_root, "tables")
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
 
 # If you want to manually specify folders, replace this block with your vector.
 run_dirs <- list.dirs(base_dir, recursive = FALSE, full.names = TRUE) %>%
@@ -124,7 +129,7 @@ print(summary_of_summaries, n = nrow(summary_of_summaries))
 
 fwrite(
   summary_of_summaries,
-  file.path(base_dir, "summary_of_summaries.tsv"),
+  file.path(tables_dir, "summary_of_summaries.tsv"),
   sep = "\t"
 )
 
@@ -212,7 +217,7 @@ p <- plot_df %>%
 print(p)
 
 ggsave(
-  filename = file.path(base_dir, "greml_h2_boxplot_by_setting.png"),
+  filename = file.path(plots_dir, "greml_h2_boxplot_by_setting.png"),
   plot = p,
   width = 12,
   height = 7,
@@ -220,5 +225,5 @@ ggsave(
 )
 
 cat("\nSaved:\n")
-cat("- ", file.path(base_dir, "summary_of_summaries.tsv"), "\n", sep = "")
-cat("- ", file.path(base_dir, "greml_h2_boxplot_by_setting.png"), "\n", sep = "")
+cat("- ", file.path(tables_dir, "summary_of_summaries.tsv"), "\n", sep = "")
+cat("- ", file.path(plots_dir, "greml_h2_boxplot_by_setting.png"), "\n", sep = "")

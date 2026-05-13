@@ -7,6 +7,11 @@ suppressPackageStartupMessages({
 # Settings
 # -----------------------------
 runs_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs"
+analysis_root <- file.path(runs_dir, "_analysis", "pairwise_h2_comparisons")
+plots_dir <- file.path(analysis_root, "plots")
+tables_dir <- file.path(analysis_root, "tables")
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
 
 # 1-vs-all mode: set method id here, e.g. "all_snps_tmm_raw_peerauto_pmg0_npc5"
 # all-pairs mode: keep NULL
@@ -441,14 +446,14 @@ build_pair_df_from_long <- function(h2_long_tbl, method_vec) {
 }
 
 prefix <- ifelse(is.null(focus_method), "all_pairs", paste0("focus_", focus_method))
-method_status_file <- file.path(runs_dir, paste0("pairwise_method_status_", prefix, ".tsv"))
+method_status_file <- file.path(tables_dir, paste0("pairwise_method_status_", prefix, ".tsv"))
 write_tsv(method_status_summary, method_status_file)
 
 overlap_all_tbl <- build_overlap_table(h2_raw %>% filter(is.finite(h2)), methods)
 overlap_pass_tbl <- build_overlap_table(h2_long_pass, methods)
 
 overlap_file <- file.path(
-  runs_dir,
+  tables_dir,
   paste0("pairwise_gene_overlap_diagnostics_", prefix, ".tsv")
 )
 overlap_diag <- overlap_pass_tbl %>%
@@ -463,7 +468,7 @@ write_tsv(overlap_diag, overlap_file)
 
 overlap_mat_pass <- build_overlap_matrix(h2_long_pass, methods, value_col = "h2")
 overlap_mat_any <- build_overlap_matrix(h2_raw %>% filter(is.finite(h2)), methods, value_col = "h2")
-overlap_matrix_file <- file.path(runs_dir, paste0("pairwise_overlap_matrix_", prefix, ".tsv"))
+overlap_matrix_file <- file.path(tables_dir, paste0("pairwise_overlap_matrix_", prefix, ".tsv"))
 bind_rows(
   as_tibble(as.data.frame(as.table(overlap_mat_pass))) %>%
     transmute(mode = "pass_finite", method_x = Var1, method_y = Var2, n_overlap = as.integer(Freq)),
@@ -773,8 +778,8 @@ plot_tpm_tmm_correlation <- function(df, subtitle_text, out_file) {
   invisible(corr_stats)
 }
 
-out_stats <- file.path(runs_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
-out_discrepancy_types <- file.path(runs_dir, paste0("pairwise_h2_discrepancy_types_", prefix, ".tsv"))
+out_stats <- file.path(tables_dir, paste0("pairwise_h2_stats_", prefix, ".tsv"))
+out_discrepancy_types <- file.path(tables_dir, paste0("pairwise_h2_discrepancy_types_", prefix, ".tsv"))
 
 stats_all <- bind_rows(
   calc_stats(snp_df) %>% mutate(section = "SNP set: ALL vs HM3"),
@@ -809,7 +814,7 @@ plot_section(
   subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (ALL)",
   y_lab = "Y-axis h2 (HM3)",
-  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")),
+  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")),
   color_var = "log_expr_plot",
   color_label = "log2(mean expr + 1)",
   color_mode = "seq"
@@ -821,7 +826,7 @@ plot_section(
   subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (TMM)",
   y_lab = "Y-axis h2 (TPM)",
-  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")),
+  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")),
   color_var = "log_expr_plot",
   color_label = "log2(mean expr + 1)",
   color_mode = "seq"
@@ -833,7 +838,7 @@ plot_section(
   subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (RAW)",
   y_lab = "Y-axis h2 (IRNT)",
-  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")),
+  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")),
   color_var = "log_expr_plot",
   color_label = "log2(mean expr + 1)",
   color_mode = "seq"
@@ -846,7 +851,7 @@ plot_section(
   subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (ALL)",
   y_lab = "Y-axis h2 (HM3)",
-  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")),
+  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")),
   color_var = "z_plot",
   color_label = "mean Wald Z (X,Y)",
   color_mode = "div"
@@ -858,7 +863,7 @@ plot_section(
   subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (TMM)",
   y_lab = "Y-axis h2 (TPM)",
-  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_zscore.png")),
+  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_zscore.png")),
   color_var = "z_plot",
   color_label = "mean Wald Z (X,Y)",
   color_mode = "div"
@@ -870,14 +875,14 @@ plot_section(
   subtitle_text = plot_subtitle,
   x_lab = "X-axis h2 (RAW)",
   y_lab = "Y-axis h2 (IRNT)",
-  out_file = file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")),
+  out_file = file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")),
   color_var = "z_plot",
   color_label = "mean Wald Z (X,Y)",
   color_mode = "div"
 )
 
 # Extra: dedicated TPM vs TMM correlation figure, split by RAW vs IRNT and ALL vs HM3
-tpm_tmm_corr_file <- file.path(runs_dir, paste0("pairwise_h2_tpm_vs_tmm_correlation_", prefix, ".png"))
+tpm_tmm_corr_file <- file.path(plots_dir, paste0("pairwise_h2_tpm_vs_tmm_correlation_", prefix, ".png"))
 plot_tpm_tmm_correlation(
   expr_df,
   subtitle_text = plot_subtitle,
@@ -885,12 +890,12 @@ plot_tpm_tmm_correlation(
 )
 
 cat("Saved grouped plots and stats:\n")
-cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_zscore.png")), "\n", sep = "")
-cat("- ", file.path(runs_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_logexpr.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_logexpr.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_logexpr.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_snp_set_all_vs_hm3_color_zscore.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_expression_tpm_vs_tmm_color_zscore.png")), "\n", sep = "")
+cat("- ", file.path(plots_dir, paste0("pairwise_h2_scatter_", prefix, "_normalization_raw_vs_irnt_color_zscore.png")), "\n", sep = "")
 cat("- ", out_stats, "\n", sep = "")
 cat("- ", out_discrepancy_types, "\n", sep = "")
 cat("- ", method_status_file, "\n", sep = "")

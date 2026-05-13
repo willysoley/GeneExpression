@@ -9,11 +9,16 @@ suppressPackageStartupMessages({
 # -----------------------------
 runs_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs"
 run_suffix <- "_peerauto_pmg0_npc5"
+analysis_root <- file.path(runs_dir, "_analysis", "tpm_tmm_peer_correlations")
+plots_dir <- file.path(analysis_root, "plots")
+tables_dir <- file.path(analysis_root, "tables")
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
 
-out_gene <- file.path(runs_dir, "tpm_tmm_peer_gene_correlations.tsv")
-out_summary <- file.path(runs_dir, "tpm_tmm_peer_correlation_summary.tsv")
-out_plot <- file.path(runs_dir, "tpm_tmm_peer_correlation_boxplot.png")
-out_scatter <- file.path(runs_dir, "tpm_tmm_peer_mean_scatter.png")
+out_gene <- file.path(tables_dir, "tpm_tmm_peer_gene_correlations.tsv")
+out_summary <- file.path(tables_dir, "tpm_tmm_peer_correlation_summary.tsv")
+out_plot <- file.path(plots_dir, "tpm_tmm_peer_correlation_boxplot.png")
+out_scatter <- file.path(plots_dir, "tpm_tmm_peer_mean_scatter.png")
 
 # -----------------------------
 # Helpers

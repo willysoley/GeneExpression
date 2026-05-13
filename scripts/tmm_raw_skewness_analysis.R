@@ -9,6 +9,11 @@ suppressPackageStartupMessages({
 # -----------------------------
 runs_dir <- "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs"
 run_suffix <- "_peerauto_pmg0_npc5"
+analysis_root <- file.path(runs_dir, "_analysis", "tmm_raw_skewness")
+plots_dir <- file.path(analysis_root, "plots")
+tables_dir <- file.path(analysis_root, "tables")
+dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
 
 # Example:
 # METHOD_ID=all_snps_tmm_raw N_SAMPLE_GENES=2000 RNG_SEED=1 N_EXAMPLES_EACH=5 Rscript script.R
@@ -210,18 +215,18 @@ summary_tbl <- skew_tbl %>%
 # Output paths
 # -----------------------------
 slug <- str_replace_all(method_id, "[^A-Za-z0-9_]+", "_")
-out_gene <- file.path(runs_dir, paste0("tmm_raw_skewness_gene_table_", slug, ".tsv"))
-out_summary <- file.path(runs_dir, paste0("tmm_raw_skewness_summary_", slug, ".tsv"))
-out_hist <- file.path(runs_dir, paste0("tmm_raw_skewness_hist_density_", slug, ".png"))
-out_scatter <- file.path(runs_dir, paste0("tmm_raw_skewness_mean_vs_skew_", slug, ".png"))
-out_skew_examples_tsv <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_genes_", slug, ".tsv"))
-out_skew_examples_plot <- file.path(runs_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
-out_h2_examples_tsv <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
-out_h2_examples_plot <- file.path(runs_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
-out_all_vs_hm3_tmm_raw_logexpr_cap5_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_log2meanexpr_cap5.png")
-out_all_vs_hm3_tmm_raw_logexpr_cap8_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_log2meanexpr_cap8.png")
-out_all_vs_hm3_tmm_raw_skew_cap2_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness_cap2.png")
-out_all_vs_hm3_tmm_raw_skew_cap5_plot <- file.path(runs_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness_cap5.png")
+out_gene <- file.path(tables_dir, paste0("tmm_raw_skewness_gene_table_", slug, ".tsv"))
+out_summary <- file.path(tables_dir, paste0("tmm_raw_skewness_summary_", slug, ".tsv"))
+out_hist <- file.path(plots_dir, paste0("tmm_raw_skewness_hist_density_", slug, ".png"))
+out_scatter <- file.path(plots_dir, paste0("tmm_raw_skewness_mean_vs_skew_", slug, ".png"))
+out_skew_examples_tsv <- file.path(tables_dir, paste0("tmm_raw_skewness_selected_genes_", slug, ".tsv"))
+out_skew_examples_plot <- file.path(plots_dir, paste0("tmm_raw_skewness_selected_gene_distributions_", slug, ".png"))
+out_h2_examples_tsv <- file.path(tables_dir, paste0("tmm_vs_tpm_h2_discrepancy_selected_genes_", slug, ".tsv"))
+out_h2_examples_plot <- file.path(plots_dir, paste0("tmm_vs_tpm_h2_discrepancy_expr_distributions_", slug, ".png"))
+out_all_vs_hm3_tmm_raw_logexpr_cap5_plot <- file.path(plots_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_log2meanexpr_cap5.png")
+out_all_vs_hm3_tmm_raw_logexpr_cap8_plot <- file.path(plots_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_log2meanexpr_cap8.png")
+out_all_vs_hm3_tmm_raw_skew_cap2_plot <- file.path(plots_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness_cap2.png")
+out_all_vs_hm3_tmm_raw_skew_cap5_plot <- file.path(plots_dir, "all_raw_h2_vs_hm3_raw_h2_tmm_colored_by_skewness_cap5.png")
 
 write_tsv(skew_tbl, out_gene)
 write_tsv(summary_tbl, out_summary)
