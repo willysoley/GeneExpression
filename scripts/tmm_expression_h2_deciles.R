@@ -15,7 +15,7 @@ run_suffix <- Sys.getenv("RUN_SUFFIX", "_peerauto_pmg0_npc5")
 
 # Comma-separated method IDs, e.g.:
 # METHOD_IDS="all_snps_tmm_raw,hm3_no_mhc_tmm_raw"
-method_ids_env <- Sys.getenv("METHOD_IDS", "all_snps_tmm_raw,hm3_no_mhc_tmm_raw")
+method_ids_env <- Sys.getenv("METHOD_IDS", "all_snps_tmm_raw,all_snps_tmm_irnt")
 method_ids <- method_ids_env %>%
   str_split(",") %>%
   unlist() %>%
@@ -237,19 +237,38 @@ p <- ggplot(analysis_tbl, aes(x = expr_decile, y = h2_GREML, fill = expr_decile)
     size = 1.9,
     stroke = 0.35
   ) +
+  geom_point(
+    data = summary_tbl,
+    aes(x = expr_decile, y = median_h2),
+    inherit.aes = FALSE,
+    shape = 21,
+    fill = "#F4A261",
+    color = "black",
+    size = 1.8,
+    stroke = 0.3
+  ) +
   geom_text(
     data = summary_tbl,
-    aes(x = expr_decile, y = mean_h2 + y_pad, label = sprintf("mean=%.3f", mean_h2)),
+    aes(
+      x = expr_decile,
+      y = pmax(mean_h2, median_h2) + y_pad,
+      label = sprintf("mean=%.3f\nmedian=%.3f", mean_h2, median_h2)
+    ),
     inherit.aes = FALSE,
-    size = 2.7,
+    size = 2.5,
     vjust = 0
   ) +
-  scale_fill_brewer(palette = "GnBu") +
+  scale_fill_manual(
+    values = setNames(
+      colorRampPalette(RColorBrewer::brewer.pal(9, "GnBu"))(10),
+      paste0("D", 1:10)
+    )
+  ) +
   facet_wrap(~ method_label, ncol = 2, scales = "fixed") +
   coord_cartesian(ylim = c(y_min, y_max + y_pad * 2.4), clip = "off") +
   labs(
     title = "GREML h2 by mean TMM expression decile",
-    subtitle = "Genes are binned into 10 deciles by per-gene mean TMM expression (PASS genes only)",
+    subtitle = "Genes are binned into 10 deciles by per-gene mean TMM expression (PASS genes only)\nWhite diamond = mean, orange circle = median",
     x = "Mean TMM expression decile (D1 = lowest, D10 = highest)",
     y = "GREML h2 estimate"
   ) +
