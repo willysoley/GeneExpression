@@ -66,6 +66,7 @@ process FILTER_EUROPEANS {
     val sdrf_url
     path fam_file
     val eur_pops
+    val unrelated_keep_file
 
     output:
     path "eur_keep.txt", emit: keep_file
@@ -116,6 +117,54 @@ process FILTER_EUROPEANS {
 
     mapped <- merge(sdrf_eur, fam, by.x=sample_col, by.y="V2")
     mapped <- unique(mapped, by=sample_col)
+
+    unrelated_keep_file <- "${unrelated_keep_file}"
+    if (nzchar(unrelated_keep_file)) {
+      if (!file.exists(unrelated_keep_file)) {
+        stop("unrelated_keep_file does not exist: ", unrelated_keep_file)
+      }
+
+      before_n <- nrow(mapped)
+      keep_dt <- fread(unrelated_keep_file, header=FALSE)
+      if (ncol(keep_dt) < 1L) {
+        stop("unrelated_keep_file must contain at least IID, or FID IID columns: ", unrelated_keep_file)
+      }
+
+      keep_dt[, V1 := as.character(V1)]
+      mapped[, V1 := as.character(V1)]
+      mapped[, (sample_col) := as.character(get(sample_col))]
+
+      if (ncol(keep_dt) >= 2L) {
+        keep_dt[, V2 := as.character(V2)]
+        keep_pairs <- unique(keep_dt[, .(FID=V1, IID=V2)])
+        exact <- merge(
+          mapped,
+          keep_pairs,
+          by.x=c("V1", sample_col),
+          by.y=c("FID", "IID")
+        )
+        if (nrow(exact) > 0L) {
+          mapped <- exact
+          keep_mode <- "FID/IID"
+        } else {
+          mapped <- mapped[get(sample_col) %in% keep_pairs\$IID]
+          keep_mode <- "IID fallback"
+        }
+      } else {
+        keep_iids <- unique(keep_dt\$V1)
+        mapped <- mapped[get(sample_col) %in% keep_iids]
+        keep_mode <- "IID"
+      }
+
+      cat("Applied unrelated_keep_file:", unrelated_keep_file, "\\n")
+      cat("Unrelated keep mode:", keep_mode, "\\n")
+      cat("Mapped European samples before unrelated keep:", before_n, "\\n")
+      cat("Mapped European samples after unrelated keep:", nrow(mapped), "\\n")
+
+      if (nrow(mapped) == 0L) {
+        stop("No mapped European samples remained after applying unrelated_keep_file.")
+      }
+    }
 
     write.table(mapped[, .(V1, get(sample_col))], "eur_keep.txt",
                 sep="\\t", quote=FALSE, row.names=FALSE, col.names=FALSE)
@@ -488,6 +537,13 @@ workflow {
     def bed_path = mustExist("plink bed", "${params.plink_prefix}.bed")
     def bim_path = mustExist("plink bim", "${params.plink_prefix}.bim")
     def fam_path = mustExist("plink fam", "${params.plink_prefix}.fam")
+    def unrelatedKeepFile = normalizeMaybeQuotedEmpty(params.unrelated_keep_file)
+    if (unrelatedKeepFile) {
+        unrelatedKeepFile = mustExist("unrelated_keep_file", unrelatedKeepFile)
+        log.info "Sample pruning: using unrelated_keep_file=${unrelatedKeepFile}"
+    } else {
+        log.info "Sample pruning: unrelated_keep_file not set; using all mapped EUR samples"
+    }
     def hm3_extract_arg = ""
     if (params.use_hm3_no_hla) {
         def hm3_path = mustExist("hm3_no_hla_snplist", params.hm3_no_hla_snplist)
@@ -520,6 +576,12 @@ workflow {
     boolean reusePhenoEnabled = !!reusePhenoDir
     boolean reuseGrmEnabled = !!reuseGrmDir
     boolean fullReuseEnabled = reusePhenoEnabled && reuseGrmEnabled
+    if (unrelatedKeepFile && fullReuseEnabled) {
+        log.warn "unrelated_keep_file is set, but both phenotype and GRM files are reused. The keep file will not change reused artifacts; make sure they were created from the same unrelated sample set."
+    }
+    if (unrelatedKeepFile && reusePhenoEnabled && !fullReuseEnabled) {
+        log.warn "unrelated_keep_file is set while reusing phenotype files and regenerating GRM/PCA. GCTA will intersect samples, but phenotype normalization/PEER was computed from the reused phenotype sample set."
+    }
 
     def grm_ch
     def pheno_ch
@@ -589,7 +651,7 @@ workflow {
         log.info "Phenotype mode: reusing files via ${reused.mode} from ${reuseDirPath}"
         log.info "Reuse mode: skipping FILTER_EUROPEANS, GENERATE_PCA, PREPARE_PHENOTYPES"
     } else {
-        FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops)
+        FILTER_EUROPEANS(params.sdrf_url, fam_ch, params.eur_pops, unrelatedKeepFile)
         GENERATE_PCA(bed_ch, bim_ch, fam_ch, FILTER_EUROPEANS.out.keep_file, hm3_extract_arg, runLabel)
         grm_ch = GENERATE_PCA.out.grm
 

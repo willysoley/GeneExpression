@@ -12,6 +12,10 @@ runs_dir <- Sys.getenv(
   "/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs"
 )
 run_suffix <- Sys.getenv("RUN_SUFFIX", "_peerauto_pmg0_npc5")
+min_log2_mean_tmm_plus1 <- as.numeric(Sys.getenv("MIN_LOG2_MEAN_TMM_PLUS1", "1.5"))
+if (!is.finite(min_log2_mean_tmm_plus1)) {
+  stop("MIN_LOG2_MEAN_TMM_PLUS1 must be numeric.")
+}
 
 # Comma-separated method IDs, e.g.:
 # METHOD_IDS="all_snps_tmm_raw,hm3_no_mhc_tmm_raw"
@@ -52,7 +56,7 @@ method_candidates <- function(method) {
   unique(out)
 }
 
-find_run_dir <- function(method) {
+find_run_dir <- function(method, require_summary = TRUE) {
   method_opts <- method_candidates(method)
   all_dirs <- list.dirs(runs_dir, recursive = FALSE, full.names = TRUE)
 
@@ -70,7 +74,7 @@ find_run_dir <- function(method) {
       has_map = map_lgl(data_dir, ~ length(list.files(.x, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE)) > 0),
       has_summary = map_lgl(summary_dir, ~ length(list.files(.x, pattern = "^final_heritability_summary.*\\.tsv$", full.names = TRUE)) > 0)
     ) %>%
-    filter(has_pheno, has_map, has_summary)
+    filter(has_pheno, has_map, if (require_summary) has_summary else TRUE)
 
   if (nrow(valid) == 0) stop("Run directory exists but required files are missing for method: ", method)
 
@@ -171,17 +175,31 @@ make_method_label <- function(method_id) {
   paste(snp, "TMM", norm, sep = " | ")
 }
 
+method_to_tmm_raw_baseline <- function(method_id) {
+  m <- str_match(method_id, "^(all_snps|hm3_no_mhc)_(tpm|tmm)_(raw|irnt|inverse_normal)$")
+  if (is.na(m[1, 1])) return(method_id)
+  paste(m[1, 2], "tmm", "raw", sep = "_")
+}
+
 # --------------------------------------------------
 # Build analysis table
 # --------------------------------------------------
 analysis_tbl <- map_dfr(method_ids, function(mid) {
   run_dir <- find_run_dir(mid)
-  expr_tbl <- read_expression_by_gene(run_dir)
+  expr_method <- method_to_tmm_raw_baseline(mid)
+  expr_run_dir <- find_run_dir(expr_method, require_summary = FALSE)
+  expr_tbl <- read_expression_by_gene(expr_run_dir)
   h2_tbl <- read_h2_summary(run_dir)
 
   merged <- h2_tbl %>%
     inner_join(expr_tbl, by = "Gene") %>%
-    filter(is.finite(mean_tmm_expression), is.finite(h2_GREML))
+    mutate(log2_mean_tmm_plus1 = log2(mean_tmm_expression + 1)) %>%
+    filter(
+      is.finite(mean_tmm_expression),
+      is.finite(log2_mean_tmm_plus1),
+      log2_mean_tmm_plus1 > min_log2_mean_tmm_plus1,
+      is.finite(h2_GREML)
+    )
 
   if (nrow(merged) < 50) {
     stop("Too few genes after merge for method ", mid, " (n=", nrow(merged), ").")
@@ -190,7 +208,10 @@ analysis_tbl <- map_dfr(method_ids, function(mid) {
   merged %>%
     mutate(
       method_id = mid,
+      expression_method_id = expr_method,
+      expression_filter_min_log2_mean_tmm_plus1 = min_log2_mean_tmm_plus1,
       run_dir = run_dir,
+      expression_run_dir = expr_run_dir,
       method_label = make_method_label(mid)
     )
 })
@@ -212,6 +233,8 @@ summary_tbl <- analysis_tbl %>%
     q25_h2 = quantile(h2_GREML, 0.25, na.rm = TRUE),
     q75_h2 = quantile(h2_GREML, 0.75, na.rm = TRUE),
     mean_tmm_expression = mean(mean_tmm_expression, na.rm = TRUE),
+    mean_log2_tmm_plus1 = mean(log2_mean_tmm_plus1, na.rm = TRUE),
+    expression_filter_min_log2_mean_tmm_plus1 = first(expression_filter_min_log2_mean_tmm_plus1),
     .groups = "drop"
   )
 
@@ -268,8 +291,11 @@ p <- ggplot(analysis_tbl, aes(x = expr_decile, y = h2_GREML, fill = expr_decile)
   coord_cartesian(ylim = c(y_min, y_max + y_pad * 2.4), clip = "off") +
   labs(
     title = "GREML h2 by mean TMM expression decile",
-    subtitle = "Genes are binned into 10 deciles by per-gene mean TMM expression (PASS genes only)\nWhite diamond = mean, orange circle = median",
-    x = "Mean TMM expression decile (D1 = lowest, D10 = highest)",
+    subtitle = sprintf(
+      "Genes are binned by matching TMM-RAW mean expression; PASS genes only; filtered to log2(mean TMM + 1) > %.2f\nWhite diamond = mean, orange circle = median",
+      min_log2_mean_tmm_plus1
+    ),
+    x = "TMM-RAW mean expression decile after low-expression filter",
     y = "GREML h2 estimate"
   ) +
   theme_bw(base_size = 12) +
