@@ -571,6 +571,61 @@ Why we use it:
 - `peer` is required to estimate PEER hidden factors.
 - Keeping these in a named environment improves reproducibility and avoids relying on whatever R packages happen to be installed on a login node.
 
+Important ownership note:
+
+- The `r_peer` environment was created by the original workflow owner.
+- A successor should not assume they can use it. On many HPC systems, a conda environment created inside another user's home or project space may be unreadable, non-writable, or tied to that user's shell initialization.
+- Even if it is technically readable, relying on another user's personal environment is fragile because packages can be removed, paths can change, and permissions can break after account changes.
+
+How to check whether the existing environment is accessible:
+
+```bash
+module load anaconda3/gpu/new
+conda env list | grep -w r_peer || true
+source activate r_peer
+which R
+Rscript -e 'pkgs <- c("data.table","edgeR","peer","matrixStats"); print(sapply(pkgs, requireNamespace, quietly=TRUE)); print(.libPaths()); sessionInfo()'
+```
+
+Interpretation:
+
+- If `source activate r_peer` works and all required packages print `TRUE`, the environment is usable from that account.
+- If activation fails, packages are missing, or the library paths point to a location the new user cannot access reliably, create a new environment.
+
+Recommended new-user environment creation:
+
+```bash
+module load anaconda3/gpu/new
+conda create -n r_peer -c conda-forge -c bioconda \
+  r-base \
+  r-data.table \
+  r-matrixstats \
+  bioconductor-edger \
+  peer
+conda activate r_peer
+Rscript -e 'library(data.table); library(edgeR); library(peer); library(matrixStats); sessionInfo()'
+```
+
+If the solver cannot find a compatible `peer` build, try the legacy Bioconda R package:
+
+```bash
+module load anaconda3/gpu/new
+conda create -n r_peer_legacy -c conda-forge -c bioconda \
+  r-base=3.4.1 \
+  r-data.table \
+  r-matrixstats \
+  bioconductor-edger \
+  r-peer
+conda activate r_peer_legacy
+Rscript -e 'library(data.table); library(edgeR); library(peer); library(matrixStats); sessionInfo()'
+```
+
+Why two options are shown:
+
+- Bioconda lists a `peer` package and older `r-peer` builds.
+- The important runtime test is whether R can load `library(peer)` together with `data.table`, `edgeR`, and `matrixStats`.
+- If neither conda route works on the HPC, ask the HPC support team or the lab to install PEER as a shared module or to provide a centrally managed conda environment.
+
 Nextflow and Java runtime:
 
 ```text
@@ -634,6 +689,46 @@ Why we use it:
 
 - Per-gene GREML produces many temporary files. Scratch storage is more appropriate than the lab project directory for high-volume Nextflow work.
 - When debugging, this is where the exact per-task GCTA command and GCTA log can be found.
+
+Important ownership note:
+
+- The default path shown above is the original owner's scratch path.
+- A successor should use their own scratch allocation, for example:
+
+```text
+/gpfs/scratch/<new_user>/nextflow_work/greml_production
+```
+
+Why each user should use their own scratch path:
+
+- Scratch directories are usually user-owned and may not be writable by other users.
+- Nextflow creates thousands of hashed task directories for per-gene GREML jobs. Keeping those in another user's scratch area can cause permission errors, quota confusion, and cleanup problems.
+- The lab project directory may have file-count or storage limits, and we already saw publish/file-volume issues when too many diagnostic files were written there.
+- Scratch is the right place for high-I/O, restartable, temporary work. The durable outputs are copied to `runs/<run-name>/results`.
+
+How to set a new scratch path at submission time:
+
+```bash
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production sbatch run_greml.sh
+```
+
+For a single explicit run:
+
+```bash
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
+  sbatch run_greml.sh \
+  --use_hm3_no_hla false \
+  --expression_source tmm \
+  --normalization_type raw
+```
+
+What this changes:
+
+- `run_greml.sh` sets `NXF_WORK=${NXF_WORK_ROOT}/${RUN_KEY}`.
+- Nextflow then runs each task under the new user's scratch directory.
+- Published results still go to the run directory under `GREML_RUN_DIR` or the submit directory.
 
 Reusable phenotype inputs from prior runs:
 
@@ -1262,6 +1357,28 @@ Go to the project root on HPC:
 cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
 ```
 
+Recommended first-time setup for a new user:
+
+```bash
+module load anaconda3/gpu/new
+source activate r_peer
+Rscript -e 'pkgs <- c("data.table","edgeR","peer","matrixStats"); print(sapply(pkgs, requireNamespace, quietly=TRUE))'
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+```
+
+If `source activate r_peer` fails, create a personal replacement environment
+using the instructions in the input inventory section. Do not assume the original
+owner's conda environment will remain accessible after handoff.
+
+Recommended submission pattern for a new user:
+
+```bash
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production sbatch run_greml.sh
+```
+
+This keeps the durable outputs under the run directory while putting high-volume
+Nextflow task work under the new user's scratch allocation.
+
 Submit the default 12-run fanout:
 
 ```bash
@@ -1311,6 +1428,11 @@ Use a different scratch root:
 ```bash
 NXF_WORK_ROOT=/gpfs/scratch/<user>/nextflow_work/greml_production sbatch run_greml.sh ...
 ```
+
+The `NXF_WORK_ROOT` override is strongly recommended for anyone other than the
+original owner. It prevents Nextflow from trying to write into
+`/gpfs/scratch/sl8085`, avoids permission problems, and keeps cache cleanup under
+the current analyst's control.
 
 ## 9. Expected Run Directory Layout
 
@@ -1633,15 +1755,18 @@ Before a new analyst reruns the workflow:
 1. Confirm the genotype prefix is correct and genome-wide if needed.
 2. Confirm the GEUVADIS TPM/count matrices exist.
 3. Confirm `gcta_path` works on compute nodes.
-4. Confirm the `r_peer` environment has `data.table`, `edgeR`, `peer`, and ideally `matrixStats`.
-5. Decide whether to provide `unrelated_keep_file`.
-6. Decide whether to run all 12 settings or a single setting.
-7. Keep `run_he=false` unless the MKL issue is solved.
-8. Run a single small/default job first if changing input paths.
-9. Check sample count in `genotype_grm.grm.id`.
-10. Check PASS/FAIL counts in the final summary.
-11. Run diagnostic plots under `scripts/`.
-12. Archive both `nextflow_logs/` and `results/`.
+4. Check whether the original `r_peer` conda environment is accessible.
+5. If not, create a personal `r_peer` replacement and confirm `data.table`, `edgeR`, `peer`, and `matrixStats` load in R.
+6. Create a personal scratch root such as `/gpfs/scratch/$USER/nextflow_work/greml_production`.
+7. Submit with `NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production`.
+8. Decide whether to provide `unrelated_keep_file`.
+9. Decide whether to run all 12 settings or a single setting.
+10. Keep `run_he=false` unless the MKL issue is solved.
+11. Run a single small/default job first if changing input paths.
+12. Check sample count in `genotype_grm.grm.id`.
+13. Check PASS/FAIL counts in the final summary.
+14. Run diagnostic plots under `scripts/`.
+15. Archive both `nextflow_logs/` and `results/`.
 
 ## 15. Source List
 
@@ -1668,6 +1793,13 @@ GTEx methods:
 
 - GTEx Analysis Methods V7 PDF.
   https://storage.googleapis.com/gtex-public-data/Portal_Analysis_Methods_v7_09052017.pdf
+
+PEER environment:
+
+- Bioconda `peer` package page.
+  https://anaconda.org/bioconda/peer
+- Bioconda `r-peer` files page.
+  https://anaconda.org/bioconda/r-peer/files
 
 GCTA/GREML:
 
