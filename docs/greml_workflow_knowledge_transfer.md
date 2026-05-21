@@ -237,6 +237,570 @@ GEUVADIS SDRF metadata:
 https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt
 ```
 
+### Detailed input file inventory
+
+This section is intentionally logistics-heavy. The goal is that the next person
+can identify each input on HPC, understand what biological or computational
+information it carries, and know why the workflow needs it.
+
+Project repository root:
+
+```text
+/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
+```
+
+What it contains:
+
+- `run_greml.sh`, the Slurm-facing driver script.
+- `nf/main.nf`, the Nextflow workflow definition.
+- `nf/nextflow.config`, the default file paths, parameters, resources, and Slurm profile.
+- `nf/bin/prepare_phenotypes.R`, the R script that turns Salmon matrices plus metadata/covariates into GCTA-compatible phenotype and covariate files.
+- `scripts/`, downstream plotting and QC scripts.
+- `docs/`, handoff and methods documentation.
+
+Why we use it:
+
+- This is the reproducible analysis root. Submitting from this directory lets `run_greml.sh` resolve the intended Nextflow project files instead of accidentally using a Slurm spool path.
+- The driver script checks the SHA-256 and modification time of `nf/bin/prepare_phenotypes.R` before launching. That protects against silently running a stale phenotype-preparation script.
+
+Upstream GEUVADIS FASTQ input used by the Salmon workflow:
+
+```text
+/gpfs/data/mostafavilab/reference_files/RNAseq/GEUVADIS/ERR*.fastq.gz
+```
+
+What it contains:
+
+- GEUVADIS RNA-seq reads, one FASTQ per ENA run ID such as `ERR...`.
+- These are the raw sequencing inputs from which transcript and gene expression were quantified.
+
+Why we use it:
+
+- GEUVADIS provides RNA-seq from lymphoblastoid cell lines with matched 1000 Genomes genotypes.
+- The ENA run IDs are later linked to individual IDs through the SDRF metadata, making it possible to match expression phenotypes to genotype samples.
+
+GRCh37/hg19 transcriptome annotation used for Salmon quantification:
+
+```text
+/gpfs/data/mostafavilab/reference_files/transcriptome/hg19/Homo_sapiens.GRCh37.75.gtf.gz
+```
+
+What it contains:
+
+- Ensembl GRCh37 release 75 gene and transcript annotations.
+- The upstream Salmon workflow parses `transcript_id` and `gene_id` from this GTF to create `tx2gene.tsv`.
+
+Why we use it:
+
+- GEUVADIS and 1000 Genomes-era resources are commonly aligned to GRCh37/hg19.
+- Using a matching GRCh37 transcriptome avoids mixing genome builds between RNA quantification and 1000 Genomes genotype resources.
+- The GTF is required to aggregate transcript-level Salmon estimates to gene-level estimates.
+
+GRCh37/hg19 cDNA fasta used for Salmon indexing:
+
+```text
+/gpfs/data/mostafavilab/reference_files/transcriptome/hg19/Homo_sapiens.GRCh37.75.cdna.all.fa.gz
+```
+
+What it contains:
+
+- Ensembl GRCh37 release 75 transcript sequences.
+- Salmon uses this fasta to build the transcriptome index.
+
+Why we use it:
+
+- Salmon quantifies reads against transcript sequences. The cDNA fasta is the reference sequence input for the quasi-mapping index.
+- It is paired with the GTF above, so transcript IDs in the fasta can be mapped back to gene IDs consistently.
+
+Salmon TPM matrix:
+
+```text
+/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_tpm.tsv
+```
+
+What it contains:
+
+- A gene-by-sample matrix produced by the previous Salmon workflow.
+- First column is the gene ID; remaining columns are GEUVADIS run/sample columns.
+- Values are Salmon gene-level TPM estimates.
+
+Where it enters this workflow:
+
+- `nf/nextflow.config` sets `params.tpm_file` to this path.
+- `PREPARE_PHENOTYPES` passes it to `nf/bin/prepare_phenotypes.R`.
+- The R script reads it with `fread()`, identifies the gene column, strips Ensembl version suffixes if present, maps sample columns to GEUVADIS run IDs, and applies the GTEx-style expression filter.
+
+Why we use it:
+
+- TPM normalizes within a sample for transcript/gene length and sequencing depth. It is useful for comparing relative expression abundance across genes within a sample.
+- TPM is part of the expression filter even when the phenotype source is TMM. A gene must have TPM above threshold in enough samples and count support in enough samples.
+- TPM can also be used directly as the phenotype source when `--expression_source tpm`.
+
+Scientific caveat:
+
+- TPM is compositional. If a few genes dominate a sample, TPM values for other genes can shift even when absolute molecule counts do not. This is one reason the workflow compares TPM-derived phenotypes to TMM-derived phenotypes.
+
+Salmon estimated-count matrix:
+
+```text
+/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_counts.tsv
+```
+
+What it contains:
+
+- A gene-by-sample matrix from Salmon `NumReads`, aggregated to gene level.
+- First column is gene ID; remaining columns correspond to GEUVADIS run/sample columns.
+- Values are estimated counts, not necessarily integers, because Salmon probabilistically assigns ambiguous reads.
+
+Where it enters this workflow:
+
+- `nf/nextflow.config` sets `params.counts_file` to this path.
+- `PREPARE_PHENOTYPES` passes it to `prepare_phenotypes.R`.
+- The R script uses counts for the GTEx-style count filter and for TMM normalization when `--expression_source tmm`.
+
+Why we use it:
+
+- TMM is defined on count data. It estimates sample-specific normalization factors that correct for library-size and composition effects.
+- Counts preserve information about read support. A gene with TPM above threshold but very low count support can be unstable for heritability estimation, so both TPM and count filters are required.
+
+GEUVADIS SDRF metadata:
+
+```text
+https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt
+```
+
+What it contains:
+
+- Sample-level GEUVADIS metadata from ArrayExpress.
+- Columns include RNA-seq run identifiers such as `ENA_RUN`, ancestry/population labels, and individual/sample identifiers.
+
+Where it enters this workflow:
+
+- `FILTER_EUROPEANS` downloads it to `sdrf.txt` inside the Nextflow task work directory.
+- The process detects the ancestry column and the `ENA_RUN` column.
+- It keeps the configured European ancestry labels and writes `eur_map.tsv`, which maps RNA run IDs to genotype FID/IID.
+
+Why we use it:
+
+- The expression matrices are indexed by RNA-seq run/sample columns, while the genotype files are indexed by 1000 Genomes FID/IID.
+- The SDRF is the bridge between those two naming systems.
+- It also allows the workflow to restrict to European GEUVADIS populations, reducing ancestry-driven structure in expression and genotype covariance.
+
+European ancestry labels used from the SDRF:
+
+```text
+British, Finnish, Tuscan, Utah
+```
+
+What they represent:
+
+- British corresponds to GBR.
+- Finnish corresponds to FIN.
+- Tuscan corresponds to TSI.
+- Utah corresponds to CEU.
+
+Why we use them:
+
+- These are the GEUVADIS European groups that match the 1000 Genomes EUR genotype resource.
+- Restricting ancestry reduces confounding from major continental population structure. Residual European substructure is handled with genotype PCs.
+
+1000 Genomes EUR PLINK prefix:
+
+```text
+/gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22
+```
+
+Files implied by the prefix:
+
+```text
+1000G.EUR.QC.22.bed
+1000G.EUR.QC.22.bim
+1000G.EUR.QC.22.fam
+```
+
+What `.bed` contains:
+
+- Binary PLINK genotype matrix.
+- Rows/variants and individuals are encoded compactly for efficient genotype operations.
+
+What `.bim` contains:
+
+- Variant metadata: chromosome, SNP ID, genetic position, base-pair position, and alleles.
+- GCTA uses this to know which variants are included and to apply optional SNP extraction.
+
+What `.fam` contains:
+
+- Sample metadata: family ID, individual ID, father ID, mother ID, sex, and phenotype placeholder.
+- This workflow uses FID/IID from the FAM to match 1000 Genomes genotypes to GEUVADIS individuals.
+
+Where it enters this workflow:
+
+- `nf/main.nf` resolves `${params.plink_prefix}.bed`, `.bim`, and `.fam`.
+- `FILTER_EUROPEANS` reads the `.fam` file to keep only SDRF samples that exist in the genotype data.
+- `GENERATE_PCA` passes the prefix to GCTA through `--bfile`.
+- `PREPARE_PHENOTYPES` also receives the `.fam` file for sample-ID consistency.
+
+Why we use it:
+
+- GREML needs a GRM derived from genotype data for the same individuals whose expression is being modeled.
+- The 1000 Genomes EUR genotype resource is the matched genotype backbone for GEUVADIS European expression samples.
+
+Critical caveat:
+
+- The configured prefix ends in `.22`. A successor must verify whether this is intentionally chromosome 22 only or whether production should use a genome-wide merged 1000 Genomes EUR prefix.
+- If this is chromosome 22 only, `h2_GREML` estimates are chromosome-22-tagged variance components, not genome-wide SNP heritability.
+
+HapMap3/no-MHC SNP list:
+
+```text
+/gpfs/data/mostafavilab/shared_data/LDSC_data/hm3_no_mhc_snps.txt
+```
+
+What it contains:
+
+- A list of SNP IDs used with GCTA `--extract`.
+- The intended variant set is HapMap3-style common, well-imputed, widely used SNPs excluding the MHC region.
+
+Where it enters this workflow:
+
+- When `--use_hm3_no_hla true`, `main.nf` validates this file and sets:
+
+```text
+--extract /gpfs/data/mostafavilab/shared_data/LDSC_data/hm3_no_mhc_snps.txt
+```
+
+- `GENERATE_PCA` passes that extraction argument to GCTA while building the GRM.
+
+Why we use it:
+
+- HapMap3 SNPs are a conservative common-SNP set often used in heritability and LDSC-style workflows.
+- Excluding the MHC avoids a region with unusually long-range LD and strong immune-related effects that can dominate covariance patterns.
+- Comparing `all_snps` against `hm3_no_mhc` tests how sensitive expression heritability estimates are to the SNP set used to build the GRM.
+
+Optional unrelated keep file:
+
+```text
+params.unrelated_keep_file = ""
+```
+
+Example command-line use:
+
+```text
+--unrelated_keep_file /path/to/geuvadis_1000g_unrelated_eur.keep
+```
+
+Expected content:
+
+- Either one column containing IID, or two columns containing FID and IID.
+- The workflow accepts both formats. If two columns are present, it first tries exact FID/IID matching and then falls back to IID matching if needed.
+
+Where it enters this workflow:
+
+- `FILTER_EUROPEANS` intersects the mapped GEUVADIS EUR samples with this keep list.
+- The resulting `eur_keep.txt` is passed to GCTA `--keep` during GRM/PCA construction.
+
+Why we use it:
+
+- Hernandez-style GEUVADIS analyses remove cryptically related samples before heritability analysis.
+- The keep-list approach is different from blindly using GCTA `--grm-cutoff 0.025`. A keep list lets the user reproduce a specific unrelated panel from 1000 Genomes relationship metadata or PLINK KING/IBD pruning.
+
+Caveat:
+
+- If phenotype and GRM files are reused with `--reuse_run_dir`, the unrelated keep file does not change those reused artifacts. The reused files must already have been created from the same sample set.
+
+GCTA executable:
+
+```text
+/gpfs/data/mostafavilab/programs/GCTA/gcta-1.95.0-linux-kernel-3-x86_64/squashfs-root/AppRun
+```
+
+What it contains:
+
+- The local GCTA 1.95 AppRun executable used for GRM construction, PCA, GREML, and optionally HE regression.
+
+Where it enters this workflow:
+
+- `GENERATE_PCA` calls it with `--make-grm` and `--pca`.
+- `ESTIMATE_HERITABILITY` calls it with `--reml` for every gene.
+- `run_he=false` is currently the default because HE regression hit a missing MKL runtime library in the AppRun environment.
+
+Why we use it:
+
+- GCTA GREML is the core variance-component estimator. It models covariance among individuals as a function of the genotype-derived GRM.
+- Using one explicit executable path avoids version drift across login nodes or modules.
+
+Phenotype-preparation script:
+
+```text
+/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/nf/bin/prepare_phenotypes.R
+```
+
+What it contains:
+
+- The R implementation of sample matching, GTEx-style expression filtering, TMM calculation, raw/IRNT phenotype transformation, PEER factor estimation, covariate file generation, and GCTA phenotype formatting.
+
+Where it enters this workflow:
+
+- `PREPARE_PHENOTYPES` runs it through `Rscript`.
+- `run_greml.sh` and `main.nf` both validate that the script contains expected diagnostic markers.
+- `main.nf` refuses to run if the selected script hash differs from the canonical `nf/bin` copy.
+
+Why we use it:
+
+- This is where most of the biological phenotype definition happens.
+- The hash checks make the workflow safer after multiple debugging iterations because they prevent an older copy of the phenotype script from silently being used.
+
+Conda/R runtime for phenotype preparation:
+
+```text
+module load anaconda3/gpu/new
+source activate r_peer
+```
+
+What it contains:
+
+- R and required packages such as `data.table`, `edgeR`, and `peer`.
+
+Where it enters this workflow:
+
+- The Slurm profile applies this `beforeScript` to `FILTER_EUROPEANS` and `PREPARE_PHENOTYPES`.
+
+Why we use it:
+
+- `edgeR` is required for TMM normalization.
+- `peer` is required to estimate PEER hidden factors.
+- Keeping these in a named environment improves reproducibility and avoids relying on whatever R packages happen to be installed on a login node.
+
+Nextflow and Java runtime:
+
+```text
+module load nextflow
+```
+
+What it contains:
+
+- Nextflow and its Java runtime dependency on the HPC module system.
+
+Where it enters this workflow:
+
+- `run_greml.sh` loads Nextflow before launching `nf/main.nf`.
+
+Why we use it:
+
+- Nextflow coordinates the many per-gene Slurm jobs, handles caching/resume, and publishes outputs into the run directories.
+
+Run directory root:
+
+```text
+/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs
+```
+
+What it contains:
+
+- One subdirectory per parameter combination, for example:
+
+```text
+all_snps_tmm_raw_peerauto_pmg0_npc5
+hm3_no_mhc_tpm_irnt_peerauto_pmg0_npc5
+```
+
+Where it enters this workflow:
+
+- `run_greml.sh` sets each Nextflow launch directory to `runs/<combo-label>`.
+- `params.outdir` becomes `runs/<combo-label>/results`.
+
+Why we use it:
+
+- Separate run directories prevent different SNP/expression/normalization combinations from overwriting each other.
+- Keeping logs and results together makes it much easier to debug a specific parameter combination.
+
+Scratch/work directory root:
+
+```text
+/gpfs/scratch/sl8085/nextflow_work/greml_production
+```
+
+What it contains:
+
+- Nextflow task work directories.
+- Per-gene `.command.sh`, `.command.run`, `.command.out`, `.command.err`, staged input files, and temporary GCTA outputs.
+
+Where it enters this workflow:
+
+- `run_greml.sh` exports `NXF_WORK`.
+- `nextflow -w` points to the run-specific scratch directory.
+
+Why we use it:
+
+- Per-gene GREML produces many temporary files. Scratch storage is more appropriate than the lab project directory for high-volume Nextflow work.
+- When debugging, this is where the exact per-task GCTA command and GCTA log can be found.
+
+Reusable phenotype inputs from prior runs:
+
+```text
+runs/<run-name>/results/data/pheno_<snp>_<source>_<normalization>.phenotypes.tsv
+runs/<run-name>/results/data/pheno_<snp>_<source>_<normalization>.qcovar
+runs/<run-name>/results/data/pheno_<snp>_<source>_<normalization>.gene_index_map.txt
+runs/<run-name>/results/data/pheno_<snp>_<source>_<normalization>.filtered_gene_ids.txt
+```
+
+What the phenotype file contains:
+
+- GCTA-compatible phenotype matrix with no header.
+- First two columns are FID and IID.
+- Each remaining column is one gene phenotype.
+
+What the qcovar file contains:
+
+- GCTA-compatible quantitative covariate matrix with no header.
+- First two columns are FID and IID.
+- Remaining columns are genotype PCs and PEER factors.
+
+What the gene index map contains:
+
+- Headered table linking `gene_name` to `mpheno_index`.
+- GCTA uses `--mpheno <index>` to choose the gene column in the phenotype matrix.
+
+What the filtered gene list contains:
+
+- Genes that passed the mandatory TPM/count expression filter before phenotype transformation.
+
+Where they enter this workflow:
+
+- If `--reuse_pheno_dir` or `--reuse_run_dir` is set, `main.nf` can skip `PREPARE_PHENOTYPES` and feed these files directly into `ESTIMATE_HERITABILITY`.
+
+Why we use them:
+
+- Preparing phenotypes can take many hours because PEER is fit over a large gene-by-sample matrix.
+- Reusing these files is appropriate when only the GCTA/GREML part changed and the sample set, expression source, normalization, PCs, and PEER settings are unchanged.
+
+Reusable GRM/PCA inputs from prior runs:
+
+```text
+runs/<run-name>/results/pca/<snp>_<source>_<normalization>/genotype_grm.grm.bin
+runs/<run-name>/results/pca/<snp>_<source>_<normalization>/genotype_grm.grm.N.bin
+runs/<run-name>/results/pca/<snp>_<source>_<normalization>/genotype_grm.grm.id
+runs/<run-name>/results/pca/<snp>_<source>_<normalization>/geno_pca.eigenvec
+```
+
+What they contain:
+
+- `.grm.bin` contains the binary lower-triangle GRM values.
+- `.grm.N.bin` contains the number of SNPs used for each pairwise relationship estimate.
+- `.grm.id` contains the FID/IID order of individuals in the GRM.
+- `geno_pca.eigenvec` contains genotype principal components for the kept samples.
+
+Where they enter this workflow:
+
+- If `--reuse_grm_dir` or `--reuse_run_dir` is set, `main.nf` can skip `FILTER_EUROPEANS` and `GENERATE_PCA` and stage the existing `genotype_grm*` files into GREML tasks.
+
+Why we use them:
+
+- GRM/PCA files depend only on genotype prefix, SNP set, and kept samples. They do not depend on TPM versus TMM or raw versus IRNT expression.
+- Reusing them saves time and avoids needless re-creation of identical genotype artifacts.
+
+Downstream summary input files:
+
+```text
+runs/<run-name>/results/summary/final_heritability_summary_<snp>_<source>_<normalization>.tsv
+```
+
+What they contain:
+
+- One row per gene.
+- Columns include `Gene`, `Status`, `Index`, `h2_GREML`, `SE_GREML`, `Pval_GREML`, `h2_HE`, and `SE_HE`.
+
+Where they enter downstream analyses:
+
+- `scripts/plot_greml_h2_summary_boxplot.R` reads them for global h2 distributions.
+- `scripts/pairwise_h2_comparisons.R` reads them for pairwise h2 scatter plots.
+- `scripts/tmm_expression_h2_deciles.R` reads them for expression decile analyses.
+- `scripts/tmm_raw_skewness_analysis.R` reads them for skewness versus h2 analyses.
+
+Why we use them:
+
+- They are the canonical per-run GREML result table.
+- Plotting scripts should use these summary files rather than scratch work directories because the summary files are stable, published outputs.
+
+Downstream phenotype inputs used by plotting/QC scripts:
+
+```text
+runs/<run-name>/results/data/pheno_<snp>_<source>_<normalization>.phenotypes.tsv
+runs/<run-name>/results/data/pheno_<snp>_<source>_<normalization>.gene_index_map.txt
+```
+
+What they contain:
+
+- The phenotype matrix contains sample-level expression phenotypes after the selected expression source, normalization mode, and PEER/PCA covariate preparation.
+- The gene index map maps phenotype columns back to Ensembl gene IDs.
+
+Where they enter downstream analyses:
+
+- `scripts/tmm_expression_h2_deciles.R` reads RAW TMM and RAW TPM phenotype files to compute expression means, medians, deciles, and skewness bins.
+- `scripts/tmm_raw_skewness_analysis.R` reads RAW TMM phenotype files to compute skewness per gene and selected expression-distribution examples.
+- `scripts/tpm_tmm_peer_correlations.R` reads TPM and TMM phenotype files to compare post-processing expression values gene-by-gene.
+- `scripts/pairwise_h2_comparisons.R` reads RAW expression phenotype files to color h2 scatter plots by log2 mean expression.
+
+Why we use them:
+
+- Summary files contain h2 but not the underlying expression distribution.
+- Phenotype files are needed to ask whether h2 differences are associated with expression abundance, zero inflation, skewness, or TPM/TMM phenotype disagreement.
+
+Caveat:
+
+- The phenotype files are already transformed according to the run setting. For expression-distribution questions, use RAW TMM or RAW TPM runs rather than IRNT runs, because IRNT intentionally erases the native expression scale.
+
+Analysis output root on HPC:
+
+```text
+/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs/_analysis
+```
+
+What it contains:
+
+- Organized downstream tables and plots produced by the R scripts in `scripts/`.
+- Subdirectories include `plot_greml_h2_summary_boxplot`, `pairwise_h2_comparisons`, `tmm_expression_h2_deciles`, `tmm_raw_skewness`, and `tpm_tmm_peer_correlations`.
+
+Why we use it:
+
+- It separates exploratory/diagnostic plots from per-run Nextflow outputs.
+- It makes it easier to copy or archive analysis products without touching Nextflow cache or scratch directories.
+
+Slurm and Nextflow log locations:
+
+```text
+runs/nextflow_logs/nextflow_driver-<combo_label>-<jobid>.out
+runs/nextflow_logs/nextflow_driver-<combo_label>-<jobid>.err
+runs/<run-name>/nextflow_logs/nextflow_<jobid>.log
+```
+
+What they contain:
+
+- Driver stdout/stderr from the Slurm job that launches Nextflow.
+- Nextflow engine logs for a specific run session.
+- Launch information, resolved paths, resume status, run key, work directory, parameter values, task failures, and work-directory pointers.
+
+Why we use them:
+
+- These are the first place to look when a run fails before producing a final summary.
+- They provide the exact work directory for failed tasks, which can then be inspected through `.command.sh`, `.command.err`, `.command.out`, `.exitcode`, and GCTA logs.
+
+Run-specific scratch work directories:
+
+```text
+/gpfs/scratch/sl8085/nextflow_work/greml_production/<run-name>
+```
+
+What they contain:
+
+- Hashed Nextflow task directories for `FILTER_EUROPEANS`, `GENERATE_PCA`, `PREPARE_PHENOTYPES`, `ESTIMATE_HERITABILITY`, `SUMMARIZE_RESULTS`, and `COMPRESS_PHENOTYPE`.
+- Per-gene intermediate GCTA files such as `<gene>_greml.gcta.log`, `<gene>_greml.hsq`, `<gene>.stats`, and `.command.*` wrapper files.
+
+Why we use them:
+
+- Published results are clean and compact, while scratch work directories preserve the exact command-level evidence needed for debugging.
+- If a gene fails or is marked `FAIL`, the scratch task directory is where to inspect the GCTA reason.
+
 ## 5. Upstream RNA-seq Quantification
 
 The previous Nextflow workflow quantified GEUVADIS RNA-seq with Salmon using
@@ -1121,4 +1685,3 @@ GEUVADIS expression heritability:
 - Dahl et al. On Negative Heritability and Negative Estimates of Heritability.
   Genetics 2020.
   https://academic.oup.com/genetics/article/215/2/343/5930411
-
