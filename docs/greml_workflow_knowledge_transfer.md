@@ -13,6 +13,90 @@ processing, and GCTA GREML. The repository also contains downstream diagnostic
 analyses to compare expression choices, normalization choices, SNP sets, and
 expression distribution properties.
 
+Important upstream relationship:
+
+```text
+The GREML workflow starts where the GEUVADIS Salmon workflow ends.
+```
+
+It does not start from FASTQ files. It starts from the two gene-level matrices
+created by the Salmon Nextflow handoff workflow:
+
+```text
+gene_counts.tsv
+gene_tpm.tsv
+```
+
+Everything downstream depends on those matrices being produced from the same
+GRCh37.75/hg19 reference, with compatible GEUVADIS sample naming, and with
+count and TPM matrices representing the same samples and genes.
+
+Main handoff products:
+
+```text
+results/summary/final_heritability_summary_<runLabel>.tsv
+results/data/pheno_<runLabel>.phenotypes.tsv
+results/data/pheno_<runLabel>.qcovar
+results/data/pheno_<runLabel>.gene_index_map.txt
+results/pca/<runLabel>/genotype_grm.*
+results/pca/<runLabel>/geno_pca.eigenvec
+runs/_analysis/*/plots/*.png
+```
+
+The summary TSV files are the primary scientific outputs. The phenotype,
+qcovar, gene map, GRM, and PCA files are the primary audit/provenance outputs.
+The `_analysis` plots are diagnostic and interpretive products built from the
+published run outputs.
+
+## If You Only Read One Page
+
+Scientific question:
+
+- Estimate how much gene expression variation across GEUVADIS European individuals is captured by genotype-derived relatedness.
+- Compare how estimates change across SNP set, expression source, and phenotype normalization.
+
+Data sources:
+
+- RNA expression comes from the GEUVADIS Salmon workflow outputs: `gene_counts.tsv` and `gene_tpm.tsv`.
+- Genotypes come from the configured 1000 Genomes EUR PLINK prefix.
+- Metadata comes from the GEUVADIS SDRF file.
+
+Estimator:
+
+- GCTA GREML estimates `h2_GREML = V(G) / Vp` per gene.
+- The GRM defines genetic similarity among individuals.
+- qcovars include genotype PCs and PEER factors.
+
+Default 12 settings:
+
+- SNP set: `all_snps` or `hm3_no_mhc`.
+- Expression source: `tmm` or `tpm`.
+- Normalization: `raw`, `irnt`, or `inverse_normal`.
+
+Main output:
+
+```text
+runs/<run-name>/results/summary/final_heritability_summary_<runLabel>.tsv
+```
+
+Most important caveats:
+
+- The default genotype prefix ends in `.22`; verify whether this is chromosome 22 only. If yes, these are chromosome-22-tagged variance estimates, not genome-wide SNP heritability.
+- `r_peer` was originally a personal conda environment. New users should test it or create their own.
+- New users should set `NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production`.
+- Full reuse ignores new sample filtering choices; do not combine `--reuse_run_dir` with a new unrelated keep file unless reused files already used that sample set.
+- `raw` h2 and `irnt` h2 are different estimands because the phenotype scale changes.
+
+First command for a new user:
+
+```bash
+cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production GREML_FANOUT=0 sbatch run_greml.sh --use_hm3_no_hla false --expression_source tmm --normalization_type raw
+```
+
+Do the single-run smoke test before launching the 12-run fanout.
+
 ## 1. Scientific Question
 
 The central question is:
@@ -139,6 +223,41 @@ In this workflow, the GRM is built once per run setting and the same GRM is used
 across genes. Each gene is then selected from a multi-phenotype file using
 GCTA's `--mpheno` option.
 
+### What We Mimic Versus What We Do Not Mimic
+
+GEUVADIS data:
+
+- We mimic prior GEUVADIS expression-genetics work by using GEUVADIS RNA-seq with matched 1000 Genomes genotypes.
+- We do not reprocess all GEUVADIS study design metadata beyond the SDRF fields needed for run/sample/population mapping.
+
+European-only analysis:
+
+- We mimic the common EUR-only framing used to reduce continental ancestry heterogeneity.
+- We do not claim the resulting h2 distributions generalize to YRI or other non-European populations.
+
+Hernandez-style unrelated samples:
+
+- We mimic the idea of removing cryptically related individuals by allowing an external 1000 Genomes/Hernandez-style unrelated keep list.
+- We do not automatically reproduce Hernandez et al.'s exact keep set unless that exact keep file is supplied.
+- We do not recommend blindly using GCTA `--grm-cutoff 0.025` as a substitute without checking the resulting sample count.
+
+GTEx-style expression filtering and PEER:
+
+- We mimic GTEx-style expression filtering and sample-size-based PEER factor selection.
+- GTEx optimized these choices mainly for eQTL discovery. In GREML, PEER can reduce unwanted variation but can also remove biological signal if over-specified.
+
+GCTA GREML:
+
+- We use GCTA GREML to estimate variance tagged by the chosen GRM.
+- This is not identical to cis-only rare-variant heritability or total gene-expression heritability.
+- `hm3_no_mhc` estimates are common, well-tagged, non-MHC SNP-tagged variance components.
+- `all_snps` estimates depend on whatever variants are actually present in the configured PLINK prefix.
+
+TPM/TMM/RAW/IRNT sensitivity:
+
+- These are workflow sensitivity analyses designed to show how expression scale and normalization choices affect h2.
+- A difference between settings should be interpreted as phenotype-definition sensitivity, not automatically as a biological discovery.
+
 ## 3. Repository Layout
 
 Primary files:
@@ -152,6 +271,16 @@ nf/bin/prepare_phenotypes.R
 scripts/
 docs/
 ```
+
+What each file or directory does:
+
+- `README.md`: repository-level orientation.
+- `run_greml.sh`: Slurm driver, fanout controller, run-directory isolation, launch locking, scratch setup, and Nextflow invocation.
+- `nf/main.nf`: DSL2 workflow defining EUR filtering, GRM/PCA creation, phenotype preparation, per-gene GREML, summary creation, and phenotype compression.
+- `nf/nextflow.config`: default input paths, scientific parameters, Slurm resources, retry settings, and process environments.
+- `nf/bin/prepare_phenotypes.R`: expression matrix loading, sample matching, GTEx-style filtering, TMM/TPM phenotype construction, RAW/IRNT transformation, PEER estimation, and qcovar/phenotype writing.
+- `scripts/`: downstream QC, plotting, decile, skewness, TPM/TMM comparison, cleanup, and archival helpers.
+- `docs/`: methods notes, run instructions, and transfer-of-knowledge documents.
 
 Important documentation already in the repo:
 
@@ -172,6 +301,15 @@ scripts/tmm_raw_skewness_analysis.R
 scripts/tpm_tmm_peer_correlations.R
 scripts/downstream_h2_regulatory_repeat_analysis.R
 ```
+
+One-line purpose of the main analysis scripts:
+
+- `scripts/plot_greml_h2_summary_boxplot.R`: summarizes h2 distributions across run settings.
+- `scripts/pairwise_h2_comparisons.R`: compares gene-level h2 estimates between settings and colors by expression or Wald Z.
+- `scripts/tmm_expression_h2_deciles.R`: bins genes by expression abundance and compares h2 by decile.
+- `scripts/tmm_raw_skewness_analysis.R`: computes raw TMM skewness and plots example gene distributions.
+- `scripts/tpm_tmm_peer_correlations.R`: compares TPM-derived and TMM-derived phenotype values after processing.
+- `scripts/downstream_h2_regulatory_repeat_analysis.R`: older follow-up analysis linking h2 to constraint, regulatory annotations, and repeats.
 
 ## 4. Main HPC Paths
 
@@ -880,6 +1018,30 @@ Why we use them:
 - These are the first place to look when a run fails before producing a final summary.
 - They provide the exact work directory for failed tasks, which can then be inspected through `.command.sh`, `.command.err`, `.command.out`, `.exitcode`, and GCTA logs.
 
+Observed production values from previous logs:
+
+```text
+mapped/sample count in representative GCTA runs: 344 individuals
+gene traits in representative phenotype files: 16690
+GCTA quantitative covariates reported in representative runs: 49
+fixed effects reported by GCTA: 50 including intercept
+```
+
+Interpretation:
+
+- These are observed examples from previous production/debug logs, not hard-coded guarantees.
+- A successor should verify them per run because unrelated sample pruning, genotype prefix changes, or phenotype filtering changes can alter the numbers.
+- With `N` around 344, the GTEx-style rule requests 45 PEER factors. The observed `49` GCTA quantitative covariates are consistent with 5 genotype PCs plus approximately 44 PEER-derived covariate columns after PEER output handling. Always verify the actual qcovar column count.
+
+Quick verification commands:
+
+```bash
+RUN_DIR=runs/all_snps_tmm_raw_peerauto_pmg0_npc5
+wc -l "$RUN_DIR/results/pca/all_snps_tmm_raw/genotype_grm.grm.id"
+awk -F'\t' 'NR==1 {print NF-2}' "$RUN_DIR/results/data/pheno_all_snps_tmm_raw.phenotypes.tsv"
+awk -F'\t' 'NR==1 {print NF-2}' "$RUN_DIR/results/data/pheno_all_snps_tmm_raw.qcovar"
+```
+
 Run-specific scratch work directories:
 
 ```text
@@ -1056,6 +1218,43 @@ Scientific rationale:
 - PCA captures broad ancestry structure and is included as a fixed covariate.
 - HM3/no-MHC reduces complexity from high-LD and difficult regions and improves
   comparability with common SNP reference analyses.
+
+How to think about GRM values:
+
+- A GRM entry is a genotype-derived estimate of how genetically similar two individuals are relative to the sample/reference allele frequencies.
+- Values near 0 mean two unrelated individuals have about average similarity.
+- Positive values mean two individuals are more genetically similar than average.
+- Very high positive values suggest close relatives or duplicated/near-duplicated samples.
+
+Approximate relationship scale:
+
+```text
+parent/child or full siblings: about 0.5
+grandparent/grandchild, half siblings, avuncular: about 0.25
+first cousins: about 0.125
+second cousins: about 0.03125
+third cousins: about 0.0078
+```
+
+Why the GCTA `0.025` cutoff matters:
+
+- A cutoff near `0.025` roughly removes relationships stronger than about second-cousin scale.
+- This can be appropriate for phenotype heritability analyses that require unrelated individuals.
+- In this GEUVADIS expression workflow, applying `--grm-cutoff 0.025` blindly was too aggressive in one check and left only a tiny sample set.
+- The preferred Hernandez-style approach here is to provide an external unrelated keep list through `--unrelated_keep_file`, then verify the final sample count.
+
+Tiny GRM intuition example:
+
+```text
+SNP1 standardized genotype: individual A = +1, individual B = +1
+SNP2 standardized genotype: individual A = -1, individual B = -1
+SNP3 standardized genotype: individual A = +1, individual B = -1
+average product = (1*1 + -1*-1 + 1*-1) / 3 = 0.33
+```
+
+The positive average means A and B share more genotype state than average across
+these toy SNPs. Real GRMs average this idea across many variants with allele
+frequency standardization.
 
 ### Step 4: PREPARE_PHENOTYPES
 
@@ -1274,6 +1473,30 @@ Scientific difference:
 - TPM is useful for abundance; TMM is often preferred for cross-sample count
   comparisons because it addresses RNA composition bias.
 
+Simple TPM intuition:
+
+```text
+TPM asks: within this sample, after accounting for gene length, what fraction of
+the transcript pool belongs to each gene?
+```
+
+This makes TPM useful for abundance, but because all TPM values in a sample sum
+to a constant, one extremely high gene can make other genes look proportionally
+smaller.
+
+Simple TMM intuition:
+
+```text
+Sample A: most genes have ordinary counts.
+Sample B: one or a few genes are extremely highly expressed.
+```
+
+If we normalized only by total library size, Sample B's effective denominator
+would be inflated by those extreme genes, making many ordinary genes look lower
+in Sample B. TMM trims extreme log-fold changes and intensity values, estimates
+a scaling factor, and uses that factor to create a more comparable effective
+library size. In this workflow, the actual phenotype is TMM-normalized CPM.
+
 ### Normalization parameters
 
 ```text
@@ -1300,6 +1523,19 @@ inverse_normal
 - Applies per-gene inverse-normal transform with Blom offset `3/8`.
 - Makes each gene approximately standard-normal across samples.
 - Less interpretable in expression units but better aligned with linear-model assumptions.
+
+Simple IRNT intuition:
+
+```text
+raw expression values: 0, 0, 1, 3, 50
+rank order:            1, 2, 3, 4, 5
+IRNT output:           normal quantiles based on those ranks
+```
+
+The extreme value `50` no longer dominates by magnitude; it only contributes as
+the highest rank. This improves robustness to skewness and outliers, but the
+heritability estimate is now for rank-normalized expression rather than native
+TPM or TMM CPM units.
 
 `inverse_normal`:
 
@@ -1330,6 +1566,26 @@ Scientific rationale:
 - `peer_max_genes = 0` means use all filtered genes for PEER.
 - Setting `peer_max_genes > 0` uses top-variance genes only and is a speed option.
 
+How PEER enters this workflow:
+
+- PEER is fit from the sample-by-gene expression matrix after expression-source selection and normalization.
+- The estimated PEER factors are not the phenotype. They are added to the qcovar file as fixed-effect covariates.
+- GCTA then estimates h2 after adjusting for those PEER factors and genotype PCs.
+
+What PEER can capture:
+
+- RNA quality differences.
+- Batch effects.
+- Cell-state differences.
+- Broad latent expression programs.
+- Other unmeasured technical or biological effects shared across many genes.
+
+Important caveat:
+
+- PEER can also remove real biological signal if too many factors are included.
+- The GTEx rule is defensible and widely used, but it was optimized for eQTL discovery rather than specifically for GREML heritability.
+- With about 344 samples, the rule requests 45 PEER factors. Previous GCTA logs reported 49 quantitative covariates total, consistent with 5 PCs plus roughly 44 PEER-derived columns after PEER output handling. Verify actual qcovar columns per run.
+
 ### GCTA parameters
 
 ```text
@@ -1349,7 +1605,121 @@ Meaning:
 
 - Exact GCTA executable used by the workflow.
 
-## 8. How To Run The Workflow
+### Slurm resources and retry behavior
+
+Driver job from `run_greml.sh`:
+
+```text
+job name = NF_GREML
+partition = mostafavilab
+cpus = 1
+memory = 8 GB
+time = 7 days
+```
+
+Process resources from `nf/nextflow.config`:
+
+```text
+FILTER_EUROPEANS:
+  cpus = 1
+  memory = 8 GB
+  time = 1h
+  environment = r_peer
+
+GENERATE_PCA:
+  cpus = 4
+  memory = 16 GB
+  time = 2h
+
+PREPARE_PHENOTYPES:
+  cpus = 4
+  memory = 64 GB
+  time = 24h
+  environment = r_peer
+
+ESTIMATE_HERITABILITY:
+  cpus = 1
+  memory = 8 GB * attempt
+  time = 4h * attempt
+  max retries = 2
+  cluster option = --signal=TERM@120 --requeue
+
+SUMMARIZE_RESULTS:
+  cpus = 1
+  memory = 16 GB
+  time = 2h
+```
+
+Retry behavior:
+
+- `ESTIMATE_HERITABILITY` retries common external-kill statuses such as memory/time/signal-related exits.
+- Per-gene GCTA failures are converted into one-line `FAIL` stats so a few bad genes do not necessarily abort the entire run.
+- A completed Nextflow run can still contain failed genes. Always inspect `Status` in the summary.
+
+## 8. Operational Preflight Checklist
+
+Most workflow failures are operational rather than statistical: wrong path,
+missing module, personal conda environment, scratch permissions, stale reuse, or
+GCTA runtime issues. Run this before submitting the 12-run fanout.
+
+Be in the project root:
+
+```bash
+cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
+test -f run_greml.sh
+test -f nf/main.nf
+test -f nf/nextflow.config
+test -f nf/bin/prepare_phenotypes.R
+```
+
+Check Nextflow and Java:
+
+```bash
+module load nextflow
+nextflow -version
+java -version
+```
+
+Check the R/PEER environment:
+
+```bash
+module load anaconda3/gpu/new
+source activate r_peer
+Rscript -e 'pkgs <- c("data.table","edgeR","peer","matrixStats"); print(sapply(pkgs, requireNamespace, quietly=TRUE)); sessionInfo()'
+```
+
+Check required input files:
+
+```bash
+test -s /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_tpm.tsv
+test -s /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_counts.tsv
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22.bed
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22.bim
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22.fam
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/hm3_no_mhc_snps.txt
+test -x /gpfs/data/mostafavilab/programs/GCTA/gcta-1.95.0-linux-kernel-3-x86_64/squashfs-root/AppRun
+```
+
+Check the GEUVADIS SDRF is reachable:
+
+```bash
+curl -L --head https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt
+```
+
+Create user-owned scratch:
+
+```bash
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+```
+
+Minimum preflight interpretation:
+
+- If `r_peer` fails, create a personal environment before running.
+- If input `test -s` commands fail, fix paths before running.
+- If `1000G.EUR.QC.22` is not intended to be chromosome 22 only, replace the genotype prefix before interpreting h2 as genome-wide.
+- If scratch is not writable, set `NXF_WORK_ROOT` to a user-owned path.
+
+## 9. How To Run The Workflow
 
 Go to the project root on HPC:
 
@@ -1378,6 +1748,38 @@ NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production sbatch run_grem
 
 This keeps the durable outputs under the run directory while putting high-volume
 Nextflow task work under the new user's scratch allocation.
+
+Current run naming behavior:
+
+```text
+run_key = <snp_set>_<expression_source>_<normalization>_peer<peer_nk>_pmg<peer_max_genes>_npc<n_pcs>
+runLabel = <snp_set>_<expression_source>_<normalization>
+phenotype prefix = pheno_<runLabel>
+summary filename = final_heritability_summary_<runLabel>.tsv
+```
+
+Example:
+
+```text
+run_key = all_snps_tmm_raw_peerauto_pmg0_npc5
+runLabel = all_snps_tmm_raw
+phenotype = pheno_all_snps_tmm_raw.phenotypes.tsv
+summary = final_heritability_summary_all_snps_tmm_raw.tsv
+```
+
+Important current behavior:
+
+- Current `run_greml.sh` uses hash-free run directories by default, such as `runs/all_snps_tmm_raw_peerauto_pmg0_npc5`.
+- Older hash-suffixed folders may exist from earlier development iterations. Treat them as historical runs unless you intentionally point reuse parameters at them.
+
+Default fanout combinations:
+
+```text
+SNP sets: all_snps, hm3_no_mhc
+Expression sources: tpm, tmm
+Normalizations: irnt, inverse_normal, raw
+Total runs: 2 x 2 x 3 = 12
+```
 
 Submit the default 12-run fanout:
 
@@ -1434,7 +1836,52 @@ original owner. It prevents Nextflow from trying to write into
 `/gpfs/scratch/sl8085`, avoids permission problems, and keeps cache cleanup under
 the current analyst's control.
 
-## 9. Expected Run Directory Layout
+Run/reuse/resume decision tree:
+
+- If only plotting code changed, do not rerun Nextflow. Rerun the relevant script in `scripts/`.
+- If only the GCTA command or GREML parsing changed, it can be safe to reuse both phenotype and GRM/PCA files.
+- If expression source, normalization, expression filters, PEER settings, PC count, or sample set changed, do not reuse phenotype files.
+- If genotype prefix, SNP set, HM3/no-MHC setting, or unrelated keep list changed, do not reuse GRM/PCA files.
+- If using a new unrelated keep file, do not use full `--reuse_run_dir` unless the reused phenotype and GRM were already created from that exact keep file.
+- If a previous run directory has confusing historical/hash naming, use a fresh `GREML_COMBO_LABEL` or archive the old run before rerunning.
+
+Reuse both phenotype and GRM/PCA from a previous run:
+
+```bash
+GREML_FANOUT=0 \
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
+  sbatch run_greml.sh \
+  --use_hm3_no_hla false \
+  --expression_source tmm \
+  --normalization_type raw \
+  --reuse_run_dir /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/runs/all_snps_tmm_raw_peerauto_pmg0_npc5
+```
+
+Reuse phenotype only and regenerate GRM/PCA:
+
+```bash
+GREML_FANOUT=0 \
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
+  sbatch run_greml.sh \
+  --use_hm3_no_hla false \
+  --expression_source tmm \
+  --normalization_type raw \
+  --reuse_pheno_dir /path/to/previous/results/data
+```
+
+Reuse GRM/PCA only and regenerate phenotypes:
+
+```bash
+GREML_FANOUT=0 \
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
+  sbatch run_greml.sh \
+  --use_hm3_no_hla false \
+  --expression_source tmm \
+  --normalization_type raw \
+  --reuse_grm_dir /path/to/previous/results/pca/all_snps_tmm_raw
+```
+
+## 10. Expected Run Directory Layout
 
 A run directory looks like:
 
@@ -1472,7 +1919,61 @@ Summary folder:
 results/summary/final_heritability_summary_all_snps_tmm_raw.tsv
 ```
 
-## 10. Quality Checks After Running
+A run is complete enough for downstream plots if it has:
+
+```text
+results/summary/final_heritability_summary_<runLabel>.tsv
+results/data/pheno_<runLabel>.phenotypes.tsv
+results/data/pheno_<runLabel>.qcovar
+results/data/pheno_<runLabel>.gene_index_map.txt
+results/pca/<runLabel>/genotype_grm.grm.bin
+results/pca/<runLabel>/genotype_grm.grm.N.bin
+results/pca/<runLabel>/genotype_grm.grm.id
+results/pca/<runLabel>/geno_pca.eigenvec
+nextflow_logs/nextflow_<jobid>.log
+```
+
+Optional but useful:
+
+```text
+results/data/pheno_<runLabel>.filtered_gene_ids.txt
+results/data/pheno_<runLabel>.phenotypes.tsv.gz
+```
+
+Important file schemas:
+
+```text
+eur_keep.txt:
+  FID    IID
+
+eur_map.tsv:
+  RNA_ID    IID    FID
+
+PLINK .fam:
+  FID    IID    father    mother    sex    phenotype
+
+pheno_<runLabel>.phenotypes.tsv:
+  no header
+  FID    IID    gene_1    gene_2    ...    gene_n
+
+pheno_<runLabel>.qcovar:
+  no header
+  FID    IID    PC1    ...    PC5    PEER1    ...    PEERk
+
+pheno_<runLabel>.gene_index_map.txt:
+  gene_name    mpheno_index
+
+final_heritability_summary_<runLabel>.tsv:
+  Gene    Status    Index    h2_GREML    SE_GREML    Pval_GREML    h2_HE    SE_HE
+```
+
+GCTA-specific detail:
+
+- The phenotype and qcovar files intentionally have no header.
+- The gene index map and final summary intentionally do have headers.
+- `mpheno_index` is one-based and refers to the gene columns after FID/IID.
+
+## 11. Quality Checks After Running
 
 Check final summary exists:
 
@@ -1505,7 +2006,338 @@ comm -23 \
 
 No output means all used samples are in the genotype panel.
 
-## 11. Downstream Analysis Scripts And Plots
+Check that phenotype/covariate files exist:
+
+```bash
+ls -lh runs/all_snps_tmm_raw_peerauto_pmg0_npc5/results/data/pheno_all_snps_tmm_raw.*
+```
+
+Check that the phenotype and gene map dimensions are consistent:
+
+```bash
+RUN_DIR=runs/all_snps_tmm_raw_peerauto_pmg0_npc5
+PHENO=$RUN_DIR/results/data/pheno_all_snps_tmm_raw.phenotypes.tsv
+MAP=$RUN_DIR/results/data/pheno_all_snps_tmm_raw.gene_index_map.txt
+awk -F'\t' 'NR==1 {print "phenotype_gene_columns=" NF-2}' "$PHENO"
+awk -F'\t' 'NR>1 {n++} END{print "gene_map_rows=" n}' "$MAP"
+```
+
+These two numbers should match.
+
+Check the Nextflow log for errors:
+
+```bash
+ls -lt runs/all_snps_tmm_raw_peerauto_pmg0_npc5/nextflow_logs/
+tail -n 200 runs/all_snps_tmm_raw_peerauto_pmg0_npc5/nextflow_logs/nextflow_*.log
+```
+
+Check whether many genes failed:
+
+```bash
+awk -F'\t' 'NR>1 && $2=="FAIL"{n++} END{print "FAIL_genes=" n+0}' \
+  runs/all_snps_tmm_raw_peerauto_pmg0_npc5/results/summary/final_heritability_summary_all_snps_tmm_raw.tsv
+```
+
+Interpretation:
+
+- A small number of failed genes can occur because per-gene GREML models may be unstable.
+- A large systematic failure usually indicates an input, environment, GCTA, or covariate problem.
+
+## 12. Failure Modes And How To Debug
+
+This section follows the same handoff logic as the Salmon workflow document:
+start from the symptom, identify the likely cause, and then inspect the smallest
+file that proves what happened.
+
+### `r_peer` or R package failure
+
+Symptom:
+
+```text
+there is no package called 'peer'
+there is no package called 'edgeR'
+source activate r_peer fails
+```
+
+Likely cause:
+
+- The original owner's conda environment is not accessible to the new user.
+- The environment exists but does not contain the required R packages.
+- The compute node does not inherit the same module/conda setup as the login node.
+
+Check:
+
+```bash
+module load anaconda3/gpu/new
+source activate r_peer
+Rscript -e 'library(data.table); library(edgeR); library(peer); library(matrixStats); sessionInfo()'
+```
+
+Recommended response:
+
+- Create a personal `r_peer` environment using the commands in the input-file inventory section.
+- Do not edit the workflow to remove PEER just to make the environment error disappear. PEER factors are part of the intended covariate model.
+
+### Scratch permission or quota failure
+
+Symptom:
+
+```text
+Permission denied
+No space left on device
+Failed to create work directory
+```
+
+Likely cause:
+
+- A new user is accidentally writing to `/gpfs/scratch/sl8085`.
+- The scratch directory does not exist.
+- The scratch quota or file-count quota is exhausted.
+
+Check:
+
+```bash
+echo "$USER"
+ls -ld /gpfs/scratch/$USER
+df -h /gpfs/scratch/$USER
+```
+
+Recommended response:
+
+```bash
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production sbatch run_greml.sh
+```
+
+### FAST phenotype preparation takes many hours
+
+Symptom:
+
+```text
+PREPARE_PHENOTYPES runs for a long time
+```
+
+Likely cause:
+
+- This is expected for full phenotype preparation because the script performs expression filtering, TMM/TPM selection, normalization, and PEER factor estimation across thousands of genes.
+
+Recommended response:
+
+- If phenotype files already exist and the sample set/expression/normalization/PEER settings did not change, reuse them with `--reuse_run_dir` or `--reuse_pheno_dir`.
+- If the sample set, unrelated keep list, expression source, normalization, PC count, or PEER settings changed, do not reuse old phenotype files.
+
+### Reuse mode cannot find phenotype files
+
+Symptom:
+
+```text
+Not found: reused phenotype file
+Not found: reused legacy phenotype file
+```
+
+Likely cause:
+
+- `reuse_run_dir` points to the wrong run directory.
+- The requested run label does not match the phenotype prefix inside `results/data`.
+- The run directory uses `pheno_<snp>_<source>_<normalization>` naming, not legacy `final.phenotypes.tsv`.
+
+Check:
+
+```bash
+REUSE_RUN=/path/to/previous/run
+find "$REUSE_RUN/results/data" -maxdepth 1 -type f | sort
+```
+
+Recommended response:
+
+- Use the run directory that matches the same SNP set, expression source, and normalization type.
+- Or pass `--reuse_pheno_dir <previous-run>/results/data` explicitly.
+
+### Run lock or Nextflow resume collision
+
+Symptom:
+
+```text
+another launch is active for RUN_KEY
+LOCK file exists
+Nextflow LOCK collision
+```
+
+Likely cause:
+
+- Two jobs are trying to resume the same run directory.
+- A previous launch is still active.
+- A stale lock remained after a crash.
+
+Check:
+
+```bash
+squeue -u $USER
+ls -lah runs/<run-name>/.nextflow/
+```
+
+Recommended response:
+
+- Do not delete locks while a job may still be running.
+- Wait for the active job to finish, or submit with a different `GREML_COMBO_LABEL` if intentionally starting a separate run.
+- Use `GREML_RUN_LOCK_WAIT_SEC=<seconds>` if the desired behavior is to wait instead of fail fast.
+
+### `ESTIMATE_HERITABILITY` exit status 2 for many genes
+
+Symptom:
+
+```text
+Process `ESTIMATE_HERITABILITY (...)` terminated with an error exit status (2)
+```
+
+Likely causes:
+
+- GCTA failed before producing a valid `.hsq` file.
+- The GCTA executable or runtime libraries are broken on the compute node.
+- Input phenotype/qcovar/GRM files are mismatched.
+- HE regression was enabled and hit the known MKL runtime problem.
+
+Find one failing work directory:
+
+```bash
+WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production/<run-name>
+find "$WORK_ROOT" -name .exitcode -exec sh -c 'c=$(cat "$1"); [ "$c" != 0 ] && echo "$(dirname "$1") $c"' sh {} \; | head
+```
+
+If the Nextflow run name is known, also query the Nextflow task table:
+
+```bash
+NXF_LOG=runs/<run-name>/nextflow_logs/nextflow_<jobid>.log
+RUN_NAME=<nextflow_run_name>
+nextflow -log "$NXF_LOG" log "$RUN_NAME" -f 'hash,name,status,exit,native_id,workdir' | grep ESTIMATE_HERITABILITY | head
+```
+
+Inspect it:
+
+```bash
+WD=/path/to/failing/workdir
+cat "$WD/.command.sh"
+cat "$WD/.command.err"
+tail -n 120 "$WD"/*_greml.gcta.log
+ls -lh "$WD"
+```
+
+Recommended response:
+
+- If the GCTA log says missing MKL libraries during HE regression, keep `run_he=false`.
+- If the GCTA log says phenotype or qcovar samples do not match the GRM, rebuild phenotype and GRM from the same sample set.
+- If the GCTA log is empty and Slurm killed the job, check `sacct` for memory/time/node failure.
+
+### External termination or scheduler kill
+
+Symptom:
+
+```text
+terminated for an unknown reason -- likely terminated by the external system
+```
+
+Likely cause:
+
+- Slurm killed the task because of time, memory, preemption, node failure, or administrative scheduling pressure.
+
+Check:
+
+```bash
+sacct -j <slurm_job_id> --format=JobID,JobName%40,State,ExitCode,Elapsed,ReqMem,MaxRSS,NodeList,Reason -P
+```
+
+Recommended response:
+
+- If the state is `OUT_OF_MEMORY`, increase memory for `ESTIMATE_HERITABILITY`.
+- If the state is `TIMEOUT`, increase time.
+- If the state is node failure/preemption, resume the workflow.
+- The workflow retries common external-kill statuses, but repeated kills should be investigated rather than ignored.
+
+### `SUMMARIZE_RESULTS` syntax or empty filename failure
+
+Symptom:
+
+```text
+syntax error near unexpected token `newline'
+echo ... >
+cat *.stats >>
+```
+
+Likely cause:
+
+- `summary_filename` resolved to an empty string.
+- This was previously observed and fixed by forcing a fallback filename in `SUMMARIZE_RESULTS`.
+
+Check:
+
+```bash
+grep -n "summary_filename" nf/main.nf nf/nextflow.config
+```
+
+Recommended response:
+
+- Make sure the current `nf/main.nf` includes the fallback logic in `SUMMARIZE_RESULTS`.
+- Avoid passing `--summary_filename ""`.
+
+### Published file or project directory file-count failure
+
+Symptom:
+
+```text
+Failed to publish file
+```
+
+Likely cause:
+
+- The lab project directory hit file-count or storage limits.
+- Too many diagnostics were being published.
+
+Recommended response:
+
+- Keep high-volume intermediate files in scratch.
+- Publish only stable final outputs under `results/`.
+- Do not publish one diagnostic file per gene unless there is a specific debugging need.
+
+### Unexpectedly tiny unrelated sample set
+
+Symptom:
+
+```text
+Kept after --grm-cutoff 0.025: very small number
+```
+
+Likely cause:
+
+- GCTA `--grm-cutoff 0.025` is too strict for this expression-analysis context if applied after constructing a GRM from closely related samples.
+- The intended Hernandez-style behavior is to provide an external unrelated keep list, not necessarily to use `--grm-cutoff 0.025` inside this workflow.
+
+Recommended response:
+
+- Use a curated 1000 Genomes unrelated keep file through `--unrelated_keep_file`.
+- Confirm the resulting sample count in `genotype_grm.grm.id`.
+
+### Many genes have `Status=FAIL`
+
+Symptom:
+
+```text
+final_heritability_summary_*.tsv contains many FAIL rows
+```
+
+Likely causes:
+
+- Per-gene GCTA convergence or boundary issues.
+- Input mismatch.
+- GCTA runtime problem.
+- Scheduler kills.
+
+Recommended response:
+
+- First count FAIL rows by run.
+- Then inspect several failing work directories and GCTA logs.
+- Do not interpret a run's h2 distribution until the failure mechanism is understood.
+
+## 13. Downstream Analysis Scripts And Plots
 
 All diagnostic analyses write under:
 
@@ -1560,6 +2392,14 @@ Scientific rationale:
 - Discrepancy counts quantify genes where one method gives high h2 and another
   gives near-zero h2.
 
+Important plot defaults:
+
+```text
+expression color caps: log2(mean expression + 1) capped at 1.5, 5, or 8 depending on plot
+skewness color caps: skewness capped at 1, 2, or 5 depending on plot
+TPM vs TMM comparison: TMM is plotted on x-axis for TPM/TMM h2 comparisons
+```
+
 ### Expression decile h2 analysis
 
 Script:
@@ -1591,6 +2431,11 @@ MIN_LOG2_MEAN_TMM_PLUS1 = 1.5
 MIN_LOG2_MEDIAN_TPM_PLUS1 = 0
 ```
 
+Interpretation:
+
+- The low-expression cutoff removes genes whose apparent low h2 may be driven by near-zero expression rather than biology.
+- Decile plots answer whether more highly expressed genes have higher or more stable h2 estimates.
+
 ### TMM raw skewness analysis
 
 Script:
@@ -1619,6 +2464,15 @@ Scientific rationale:
   expression distribution level.
 - ALL-vs-HM3 colored scatter tests whether SNP-set sensitivity is linked to
   expression abundance or skewness.
+
+Important plot defaults:
+
+```text
+skewness histogram bins: high-resolution defaults in the script
+non-zero-inflated high-skew examples: selected to avoid examples driven only by near-zero counts
+strict high-count examples: includes genes where most counts are > 10
+color caps for ALL-vs-HM3 h2 plots: expression caps 1.5, 5, 8 and skewness caps 1, 2, 5
+```
 
 ### TPM vs TMM phenotype correlations
 
@@ -1667,7 +2521,7 @@ Scientific rationale:
 - Observed-vs-background repeat analysis asks whether repeat patterns exceed
   random genomic expectation.
 
-## 12. Interpretation Guide For Main Plots
+## 14. Interpretation Guide For Main Plots
 
 ### h2 boxplot by setting
 
@@ -1720,7 +2574,18 @@ Interpretation:
 - High correlation: TPM and TMM mostly preserve individual-level ordering.
 - Low correlation: TPM/TMM choice can change the phenotype and therefore h2.
 
-## 13. Known Caveats
+## 15. What This Workflow Does Not Do
+
+- It does not start from FASTQ files. FASTQ-to-matrix processing belongs to the GEUVADIS Salmon workflow.
+- It does not run read-level RNA QC, FastQC, MultiQC, adapter trimming, or alignment QC.
+- It does not automatically validate whether the configured genotype prefix is genome-wide or chromosome-specific.
+- It does not automatically derive a Hernandez exact unrelated keep set. A keep file must be provided explicitly.
+- It does not publish every per-gene GCTA log by default. High-volume per-gene artifacts remain in scratch work directories.
+- It does not guarantee every gene passes GREML just because Nextflow completes.
+- It does not estimate total gene expression heritability from all possible variant classes. It estimates variance captured by the GRM built from the selected SNP set.
+- It does not make TPM, TMM, RAW, and IRNT estimates directly interchangeable. These are different phenotype definitions.
+
+## 16. Known Caveats
 
 1. The default genotype prefix ends with `.22`. Confirm whether the analysis is
    intentionally chromosome 22 only or whether genome-wide genotype files should
@@ -1748,7 +2613,42 @@ Interpretation:
 8. Plot files are generated on the HPC run directory under `runs/_analysis/`;
    they are not stored in this local repo by default.
 
-## 14. Minimal Handoff Checklist
+## 17. Cleanup And Archiving
+
+The durable scientific outputs are in `results/` and `nextflow_logs/`. The high-volume task cache is in scratch. Treat these differently.
+
+Archive phenotype files before cleanup:
+
+```bash
+scripts/zip_phenofiles.sh \
+  --data-dir runs/all_snps_tmm_raw_peerauto_pmg0_npc5/results/data
+```
+
+Dry-run cleanup for one run:
+
+```bash
+scripts/cleanup_nextflow_cache.sh \
+  --run-dir runs/all_snps_tmm_raw_peerauto_pmg0_npc5 \
+  --nxf-work /gpfs/scratch/$USER/nextflow_work/greml_production/all_snps_tmm_raw_peerauto_pmg0_npc5
+```
+
+Execute cleanup of cache/log/work files:
+
+```bash
+scripts/cleanup_nextflow_cache.sh \
+  --run-dir runs/all_snps_tmm_raw_peerauto_pmg0_npc5 \
+  --nxf-work /gpfs/scratch/$USER/nextflow_work/greml_production/all_snps_tmm_raw_peerauto_pmg0_npc5 \
+  --execute
+```
+
+Important warnings:
+
+- Do not use cleanup options that delete `results/` unless you intentionally want to remove durable outputs.
+- Keep `results/summary`, `results/data`, `results/pca`, and `nextflow_logs` for reproducibility.
+- Once scratch cache is deleted, Nextflow `-resume` cannot reuse those per-task work directories.
+- If storage pressure is the problem, archive first, then clean scratch; do not silently delete the only copy of phenotype or summary files.
+
+## 18. Minimal Handoff Checklist
 
 Before a new analyst reruns the workflow:
 
@@ -1768,7 +2668,61 @@ Before a new analyst reruns the workflow:
 14. Run diagnostic plots under `scripts/`.
 15. Archive both `nextflow_logs/` and `results/`.
 
-## 15. Source List
+## 19. Running A Simple New GREML Analysis
+
+This repository can be adapted to a new expression heritability analysis, but do
+not treat it as a one-line path swap. The key question is whether the new data
+still satisfy the same contract as the GEUVADIS/1000G run.
+
+If using new expression matrices with the same GEUVADIS/1000G sample IDs:
+
+- Update `params.tpm_file`.
+- Update `params.counts_file`.
+- Confirm both matrices have the same genes and sample columns.
+- Confirm sample columns can still be mapped through the GEUVADIS SDRF `ENA_RUN` IDs.
+- Run one single setting before launching fanout.
+
+If using a new genotype panel:
+
+- Update `params.plink_prefix`.
+- Confirm `.bed`, `.bim`, and `.fam` exist.
+- Confirm FAM IIDs can be matched to the expression sample IDs.
+- Confirm the HM3/no-MHC SNP list uses SNP IDs that exist in the new `.bim`, or disable HM3 mode.
+- Rebuild GRM/PCA; do not reuse old GRM files.
+
+If using a new sample set:
+
+- Provide a new metadata/map strategy or rewrite `FILTER_EUROPEANS`.
+- Do not reuse phenotype files from the old sample set.
+- Do not reuse GRM/PCA from the old sample set.
+- Reconsider PEER factor count because the GTEx-style rule depends on sample size.
+
+If only changing downstream plots:
+
+- Do not rerun Nextflow.
+- Rerun only the relevant script in `scripts/`.
+- Keep the same `runs/` directory as input and write new plots under `runs/_analysis`.
+
+Smoke-test command for one setting:
+
+```bash
+cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+GREML_FANOUT=0 GREML_RESUME=0 \
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
+  sbatch run_greml.sh \
+  --use_hm3_no_hla false \
+  --expression_source tmm \
+  --normalization_type raw
+```
+
+Current limitation:
+
+- The workflow does not currently expose a `max_genes` or small-gene test parameter.
+- A true small test mode would need to be added deliberately, for example by adding a parameter that subsets the gene index map before `ESTIMATE_HERITABILITY`.
+- Do not manually edit production phenotype files just to make a small test unless the output directory is clearly marked as a temporary development run.
+
+## 20. Source List
 
 GEUVADIS/1000G:
 
