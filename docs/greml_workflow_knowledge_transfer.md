@@ -48,72 +48,136 @@ qcovar, gene map, GRM, and PCA files are the primary audit/provenance outputs.
 The `_analysis` plots are diagnostic and interpretive products built from the
 published run outputs.
 
-Important source files for this handoff:
+## 0. Simplified Order Of Operations
 
-```text
-docs/greml_workflow_knowledge_transfer.md
-docs/greml_workflow_knowledge_transfer.pdf
-scripts/render_greml_workflow_knowledge_transfer_pdf.R
-```
+Start here and do the steps in this order.
 
-The markdown file is the source of truth. The PDF is the shareable handoff
-artifact. Regenerate the PDF after editing the markdown.
+This is the short version for rerunning the existing GEUVADIS GREML workflow. A
+more detailed, line-by-line order of operations is provided later in `How To Run
+The Workflow` and `How To Run This Again With New Expression Or Genotype Data`.
+Those sections are the practical recipes to follow when adapting this workflow
+to a new expression or genotype input set.
 
-Regenerate command from the local repository checkout:
-
-```bash
-cd /Users/sl8085/Documents/MostafaviLab/Git/GeneExpression
-Rscript scripts/render_greml_workflow_knowledge_transfer_pdf.R
-```
-
-## If You Only Read One Page
-
-Scientific question:
-
-- Estimate how much gene expression variation across GEUVADIS European individuals is captured by genotype-derived relatedness.
-- Compare how estimates change across SNP set, expression source, and phenotype normalization.
-
-Data sources:
-
-- RNA expression comes from the GEUVADIS Salmon workflow outputs: `gene_counts.tsv` and `gene_tpm.tsv`.
-- Genotypes come from the configured 1000 Genomes EUR PLINK prefix.
-- Metadata comes from the GEUVADIS SDRF file.
-
-Estimator:
-
-- GCTA GREML estimates `h2_GREML = V(G) / Vp` per gene.
-- The GRM defines genetic similarity among individuals.
-- qcovars include genotype PCs and PEER factors.
-
-Default 12 settings:
-
-- SNP set: `all_snps` or `hm3_no_mhc`.
-- Expression source: `tmm` or `tpm`.
-- Normalization: `raw`, `irnt`, or `inverse_normal`.
-
-Main output:
-
-```text
-runs/<run-name>/results/summary/final_heritability_summary_<runLabel>.tsv
-```
-
-Most important caveats:
-
-- The default genotype prefix ends in `.22`; verify whether this is chromosome 22 only. If yes, these are chromosome-22-tagged variance estimates, not genome-wide SNP heritability.
-- `r_peer` was originally a personal conda environment. New users should test it or create their own.
-- New users should set `NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production`.
-- Full reuse ignores new sample filtering choices; do not combine `--reuse_run_dir` with a new unrelated keep file unless reused files already used that sample set.
-- `raw` h2 and `irnt` h2 are different estimands because the phenotype scale changes.
-
-First command for a new user:
+1. Confirm you are on the HPC system with access to `/gpfs`.
+2. Go to the GREML project directory:
 
 ```bash
 cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
-mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
-NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production GREML_FANOUT=0 sbatch run_greml.sh --use_hm3_no_hla false --expression_source tmm --normalization_type raw
 ```
 
-Do the single-run smoke test before launching the 12-run fanout.
+3. Confirm the upstream Salmon matrices exist:
+
+```bash
+test -s /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_tpm.tsv
+test -s /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260125_salmon_nextflow/results/matrices/gene_counts.tsv
+```
+
+4. Confirm the genotype and SNP-set inputs exist:
+
+```bash
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22.bed
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22.bim
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/1000G_EUR_Phase3_plink/1000G.EUR.QC.22.fam
+test -s /gpfs/data/mostafavilab/shared_data/LDSC_data/hm3_no_mhc_snps.txt
+```
+
+5. Confirm the R/PEER environment and GCTA executable work:
+
+```bash
+module load anaconda3/gpu/new
+source activate r_peer
+Rscript -e 'pkgs <- c("data.table","edgeR","peer","matrixStats"); print(sapply(pkgs, requireNamespace, quietly=TRUE))'
+test -x /gpfs/data/mostafavilab/programs/GCTA/gcta-1.95.0-linux-kernel-3-x86_64/squashfs-root/AppRun
+```
+
+6. Create a user-owned Nextflow scratch directory:
+
+```bash
+mkdir -p /gpfs/scratch/$USER/nextflow_work/greml_production
+```
+
+7. Run one smoke-test setting before launching all 12 runs:
+
+```bash
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
+GREML_FANOUT=0 \
+sbatch run_greml.sh \
+  --use_hm3_no_hla false \
+  --expression_source tmm \
+  --normalization_type raw
+```
+
+8. If the smoke test works, submit the default 12-run fanout:
+
+```bash
+NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production sbatch run_greml.sh
+```
+
+9. Watch the run-specific Nextflow logs:
+
+```bash
+ls -lt runs/*/nextflow_logs/nextflow_*.log | head
+```
+
+10. After completion, confirm final summary files exist:
+
+```bash
+ls runs/*_peerauto_pmg0_npc5/results/summary/final_heritability_summary*.tsv
+```
+
+11. Check PASS/FAIL counts before interpreting h2:
+
+```bash
+awk -F'\t' 'NR>1{n[$2]++} END{for (k in n) print k, n[k]}' \
+  runs/all_snps_tmm_raw_peerauto_pmg0_npc5/results/summary/final_heritability_summary_all_snps_tmm_raw.tsv
+```
+
+12. Run downstream plotting scripts only after the Nextflow outputs pass QC.
+
+13. Save the run name, summary files, phenotype files, qcovar files, GRM/PCA
+files, Nextflow logs, GCTA version, and any plotting outputs used in the lab
+meeting or manuscript.
+
+## 0A. Quick FAQ
+
+If you want to know what this workflow is trying to estimate, look at
+`Scientific Question` and `Previous Research And What This Workflow Mimics`.
+
+If you want to know what files were used as inputs, look at `Main HPC Paths` and
+`Detailed Input File Inventory`.
+
+If you want to know where the upstream RNA-seq matrices came from, look at
+`Detailed Input File Inventory`, under `Upstream RNA-seq Quantification`.
+
+If you want to know the exact order in which the Nextflow workflow runs
+internally, look at `Main Nextflow Workflow Logic`.
+
+If you want to know what each parameter means biologically and computationally,
+look at `Parameter Table And Meaning`.
+
+If you are taking over the workflow from another user, first read the notes on
+`r_peer`, personal conda environments, and user-owned scratch paths in `Main HPC
+Paths`.
+
+If you want to rerun the current GEUVADIS workflow without changing the data,
+look at `Simplified Order Of Operations` and `How To Run The Workflow`.
+
+If you want to run a single test setting rather than all 12 settings, look at
+`How To Run This Again With New Expression Or Genotype Data`.
+
+If you want to know what files should exist after a successful run, look at
+`Expected Output Directory Layout`.
+
+If you want to check whether the run worked, look at `Quality Checks After
+Running`.
+
+If you want to know what to do when something fails, look at `Failure Modes And
+How To Debug`.
+
+If you want to know what plots were generated and why, look at `Downstream Use Of Outputs`.
+
+If you want the shortest possible checklist before handing the workflow to the
+next person, look at `Minimal Handoff Checklist`.
 
 ## 1. Scientific Question
 
@@ -300,6 +364,23 @@ What each file or directory does:
 - `scripts/`: downstream QC, plotting, decile, skewness, TPM/TMM comparison, cleanup, and archival helpers.
 - `docs/`: methods notes, run instructions, and transfer-of-knowledge documents.
 
+
+Important source files for this handoff:
+
+```text
+docs/greml_workflow_knowledge_transfer.md
+docs/greml_workflow_knowledge_transfer.pdf
+scripts/render_greml_workflow_knowledge_transfer_pdf.R
+```
+
+The markdown file is the source of truth. The PDF is the shareable handoff
+artifact. Regenerate the PDF after editing the markdown:
+
+```bash
+cd /Users/sl8085/Documents/MostafaviLab/Git/GeneExpression
+Rscript scripts/render_greml_workflow_knowledge_transfer_pdf.R
+```
+
 Important documentation already in the repo:
 
 ```text
@@ -393,7 +474,39 @@ GEUVADIS SDRF metadata:
 https://www.ebi.ac.uk/arrayexpress/files/E-GEUV-1/E-GEUV-1.sdrf.txt
 ```
 
-### Detailed input file inventory
+## 4A. Software Versions, Installation, And Provenance
+
+The workflow relies on a combination of HPC modules, a conda/R environment, and
+an explicit GCTA executable path.
+
+Core runtime components:
+
+```text
+Nextflow, loaded with `module load nextflow`
+Anaconda module, loaded with `module load anaconda3/gpu/new`
+R/PEER conda environment, activated with `source activate r_peer`
+GCTA 1.95.0 AppRun executable
+Slurm on the `mostafavilab` partition
+```
+
+The `r_peer` environment was originally created by the workflow owner. A new
+user should first test whether it is readable and functional from their account.
+If not, they should create their own replacement environment with `data.table`,
+`edgeR`, `peer`, and `matrixStats`. The detailed commands are listed in the
+input inventory below.
+
+The GREML estimator is pinned by explicit executable path rather than by module:
+
+```text
+/gpfs/data/mostafavilab/programs/GCTA/gcta-1.95.0-linux-kernel-3-x86_64/squashfs-root/AppRun
+```
+
+The upstream expression matrices are inherited from the GEUVADIS Salmon
+workflow. They were generated from Ensembl GRCh37.75/hg19 GTF and cDNA reference
+files. The current Salmon handoff should be treated as the provenance document
+for FASTQ-to-matrix quantification.
+
+## 5. Detailed Input File Inventory
 
 This section is intentionally logistics-heavy. The goal is that the next person
 can identify each input on HPC, understand what biological or computational
@@ -1076,7 +1189,7 @@ Why we use them:
 - Published results are clean and compact, while scratch work directories preserve the exact command-level evidence needed for debugging.
 - If a gene fails or is marked `FAIL`, the scratch task directory is where to inspect the GCTA reason.
 
-## 5. Upstream RNA-seq Quantification
+### Upstream RNA-seq Quantification
 
 The previous Nextflow workflow quantified GEUVADIS RNA-seq with Salmon using
 GRCh37/hg19 Ensembl 75 transcriptome references:
@@ -1443,7 +1556,7 @@ Each gene gets `PASS` or `FAIL`. Per-gene failures do not necessarily fail the
 whole workflow because the workflow writes a `.stats` row and exits the gene job
 cleanly.
 
-## 7. Parameter Table And Scientific Meaning
+## 7. Parameter Table And Meaning
 
 ### Sample and genotype parameters
 
@@ -1720,7 +1833,9 @@ Retry behavior:
 - Per-gene GCTA failures are converted into one-line `FAIL` stats so a few bad genes do not necessarily abort the entire run.
 - A completed Nextflow run can still contain failed genes. Always inspect `Status` in the summary.
 
-## 8. Operational Preflight Checklist
+## 8. How To Run The Workflow
+
+### Operational Preflight Checklist
 
 Most workflow failures are operational rather than statistical: wrong path,
 missing module, personal conda environment, scratch permissions, stale reuse, or
@@ -1783,7 +1898,7 @@ Minimum preflight interpretation:
 - If `1000G.EUR.QC.22` is not intended to be chromosome 22 only, replace the genotype prefix before interpreting h2 as genome-wide.
 - If scratch is not writable, set `NXF_WORK_ROOT` to a user-owned path.
 
-## 9. How To Run The Workflow
+### Detailed Run Commands
 
 Go to the project root on HPC:
 
@@ -1945,7 +2060,7 @@ NXF_WORK_ROOT=/gpfs/scratch/$USER/nextflow_work/greml_production \
   --reuse_grm_dir /path/to/previous/results/pca/all_snps_tmm_raw
 ```
 
-## 10. Expected Run Directory Layout
+## 9. Expected Output Directory Layout
 
 A run directory looks like:
 
@@ -2037,7 +2152,7 @@ GCTA-specific detail:
 - The gene index map and final summary intentionally do have headers.
 - `mpheno_index` is one-based and refers to the gene columns after FID/IID.
 
-## 11. Quality Checks After Running
+## 10. Quality Checks After Running
 
 Check final summary exists:
 
@@ -2107,7 +2222,7 @@ Interpretation:
 - A small number of failed genes can occur because per-gene GREML models may be unstable.
 - A large systematic failure usually indicates an input, environment, GCTA, or covariate problem.
 
-## 12. Failure Modes And How To Debug
+## 11. Failure Modes And How To Debug
 
 This section follows the same handoff logic as the Salmon workflow document:
 start from the symptom, identify the likely cause, and then inspect the smallest
@@ -2401,7 +2516,7 @@ Recommended response:
 - Then inspect several failing work directories and GCTA logs.
 - Do not interpret a run's h2 distribution until the failure mechanism is understood.
 
-## 13. Downstream Analysis Scripts And Plots
+## 12. Downstream Use Of Outputs
 
 All diagnostic analyses write under:
 
@@ -2585,7 +2700,7 @@ Scientific rationale:
 - Observed-vs-background repeat analysis asks whether repeat patterns exceed
   random genomic expectation.
 
-## 14. Interpretation Guide For Main Plots
+### Interpretation Guide For Main Plots
 
 ### h2 boxplot by setting
 
@@ -2638,7 +2753,9 @@ Interpretation:
 - High correlation: TPM and TMM mostly preserve individual-level ordering.
 - Low correlation: TPM/TMM choice can change the phenotype and therefore h2.
 
-## 15. What This Workflow Does Not Do
+## 13. Known Caveats
+
+### What This Workflow Does Not Do
 
 - It does not start from FASTQ files. FASTQ-to-matrix processing belongs to the GEUVADIS Salmon workflow.
 - It does not run read-level RNA QC, FastQC, MultiQC, adapter trimming, or alignment QC.
@@ -2649,7 +2766,7 @@ Interpretation:
 - It does not estimate total gene expression heritability from all possible variant classes. It estimates variance captured by the GRM built from the selected SNP set.
 - It does not make TPM, TMM, RAW, and IRNT estimates directly interchangeable. These are different phenotype definitions.
 
-## 16. Known Caveats
+### Additional Known Caveats
 
 1. The default genotype prefix ends with `.22`. Confirm whether the analysis is
    intentionally chromosome 22 only or whether genome-wide genotype files should
@@ -2677,7 +2794,7 @@ Interpretation:
 8. Plot files are generated on the HPC run directory under `runs/_analysis/`;
    they are not stored in this local repo by default.
 
-## 17. Cleanup And Archiving
+### Cleanup And Archiving
 
 The durable scientific outputs are in `results/` and `nextflow_logs/`. The high-volume task cache is in scratch. Treat these differently.
 
@@ -2712,7 +2829,7 @@ Important warnings:
 - Once scratch cache is deleted, Nextflow `-resume` cannot reuse those per-task work directories.
 - If storage pressure is the problem, archive first, then clean scratch; do not silently delete the only copy of phenotype or summary files.
 
-## 18. Minimal Handoff Checklist
+## 14. Minimal Handoff Checklist
 
 Before a new analyst reruns the workflow:
 
@@ -2732,7 +2849,7 @@ Before a new analyst reruns the workflow:
 14. Run diagnostic plots under `scripts/`.
 15. Archive both `nextflow_logs/` and `results/`.
 
-## 19. Running A Simple New GREML Analysis
+## 15. How To Run This Again With New Expression Or Genotype Data
 
 This repository can be adapted to a new expression heritability analysis, but do
 not treat it as a one-line path swap. The key question is whether the new data
@@ -2786,7 +2903,7 @@ Current limitation:
 - A true small test mode would need to be added deliberately, for example by adding a parameter that subsets the gene index map before `ESTIMATE_HERITABILITY`.
 - Do not manually edit production phenotype files just to make a small test unless the output directory is clearly marked as a temporary development run.
 
-## 20. Source List
+## 16. Source List
 
 GEUVADIS/1000G:
 
