@@ -36,9 +36,9 @@ if (!shet_x_mode %in% c("actual", "decile", "both")) {
   stop("SHET_X_MODE must be one of: actual, decile, both")
 }
 
-tpm_cor_bins <- suppressWarnings(as.integer(Sys.getenv("TPM_COR_BINS", "10")))
-if (!is.finite(tpm_cor_bins) || tpm_cor_bins < 3L) {
-  stop("TPM_COR_BINS must be an integer >= 3")
+n_deciles <- suppressWarnings(as.integer(Sys.getenv("N_DECILES", "10")))
+if (!is.finite(n_deciles) || n_deciles != 10L) {
+  stop("N_DECILES must be 10 for decile-based plots.")
 }
 
 cor_method <- tolower(Sys.getenv("COR_METHOD", "spearman"))
@@ -46,11 +46,13 @@ if (!cor_method %in% c("pearson", "spearman", "kendall")) {
   stop("COR_METHOD must be one of: pearson, spearman, kendall")
 }
 
+h2_low_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
+if (!is.finite(h2_low_cutoff) || h2_low_cutoff < 0) {
+  stop("H2_LO_CUTOFF must be a non-negative numeric value.")
+}
+
 analysis_root <- file.path(runs_dir, "_analysis", "shet_tpm_h2_plots")
-plots_dir <- file.path(analysis_root, "plots")
-tables_dir <- file.path(analysis_root, "tables")
-dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
-dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+dir.create(analysis_root, recursive = TRUE, showWarnings = FALSE)
 
 # --------------------------------------------------
 # Helpers
@@ -153,7 +155,7 @@ read_h2_by_gene <- function(run_dir, h2_col_name) {
     summarise(!!h2_col_name := mean(h2, na.rm = TRUE), .groups = "drop")
 }
 
-read_mean_expression_by_gene <- function(run_dir, out_col_name = "mean_tpm") {
+read_tpm_metrics_by_gene <- function(run_dir) {
   data_dir <- file.path(run_dir, "results", "data")
   pheno_file <- list.files(data_dir, pattern = "^pheno_.*\\.phenotypes\\.tsv$", full.names = TRUE) %>% .[[1]]
   map_file <- list.files(data_dir, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE) %>% .[[1]]
@@ -189,12 +191,16 @@ read_mean_expression_by_gene <- function(run_dir, out_col_name = "mean_tpm") {
 
   tibble(
     Gene = normalize_gene_id(colnames(expr)),
-    value = colMeans(expr, na.rm = TRUE)
+    mean_tpm = colMeans(expr, na.rm = TRUE),
+    median_tpm = apply(expr, 2, median, na.rm = TRUE)
   ) %>%
-    filter(is.finite(value)) %>%
+    filter(is.finite(mean_tpm), is.finite(median_tpm)) %>%
     group_by(Gene) %>%
-    summarise(value = mean(value, na.rm = TRUE), .groups = "drop") %>%
-    rename(!!out_col_name := value)
+    summarise(
+      mean_tpm = mean(mean_tpm, na.rm = TRUE),
+      median_tpm = mean(median_tpm, na.rm = TRUE),
+      .groups = "drop"
+    )
 }
 
 plot_h2_shet <- function(df, x_mode, out_file) {
@@ -235,21 +241,175 @@ plot_h2_shet <- function(df, x_mode, out_file) {
         .groups = "drop"
       )
 
-    p <- ggplot(decile_tbl, aes(x = factor(post_mean_bin), y = mean_h2, color = h2_type, group = h2_type)) +
+    decile_long <- decile_tbl %>%
+      pivot_longer(
+        cols = c(mean_h2, median_h2),
+        names_to = "stat_type",
+        values_to = "h2_value"
+      ) %>%
+      mutate(
+        stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2")
+      )
+
+    p <- ggplot(
+      decile_long,
+      aes(
+        x = factor(post_mean_bin),
+        y = h2_value,
+        color = h2_type,
+        linetype = stat_type,
+        group = interaction(h2_type, stat_type)
+      )
+    ) +
       geom_line(linewidth = 1) +
-      geom_point(size = 2) +
+      geom_point(size = 1.8) +
       labs(
-        title = "Mean h2 (RAW vs IRNT) by s_het decile",
-        subtitle = "Each point is a decile-level mean",
+        title = "h2 (RAW vs IRNT): mean and median by s_het decile",
+        subtitle = "Each point is a decile-level summary",
         x = "s_het post_mean decile",
-        y = "Mean h2_GREML",
-        color = "Normalization"
+        y = "h2_GREML",
+        color = "Normalization",
+        linetype = "Summary"
       ) +
       theme_minimal(base_size = 11) +
       theme(panel.grid.minor = element_blank())
   }
 
   ggsave(out_file, p, width = 8, height = 5, dpi = 300)
+}
+
+run_plot_suite <- function(df, suite_name, suite_subtitle) {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+  dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+  suite_tbl <- df %>%
+    mutate(
+      post_mean_bin = ntile(post_mean, n_deciles),
+      mean_tpm_decile = ntile(mean_tpm, n_deciles),
+      median_tpm_decile = ntile(median_tpm, n_deciles)
+    )
+
+  # Plot 1: Shet decile vs mean/median TPM
+  p1_decile_tbl <- suite_tbl %>%
+    group_by(post_mean_bin) %>%
+    summarise(
+      n_genes = n(),
+      mean_tpm = mean(mean_tpm, na.rm = TRUE),
+      median_tpm = median(median_tpm, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(post_mean_bin)
+
+  p1_decile_long <- p1_decile_tbl %>%
+    pivot_longer(
+      cols = c(mean_tpm, median_tpm),
+      names_to = "metric",
+      values_to = "value"
+    ) %>%
+    mutate(
+      metric = recode(metric, mean_tpm = "Mean TPM", median_tpm = "Median TPM")
+    )
+
+  p1_decile <- ggplot(
+    p1_decile_long,
+    aes(x = factor(post_mean_bin), y = value, color = metric, group = metric)
+  ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    labs(
+      title = "TPM by s_het decile",
+      subtitle = suite_subtitle,
+      x = "s_het post_mean decile (1-10)",
+      y = "TPM",
+      color = "TPM summary"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+
+  ggsave(file.path(plots_dir, "plot1_shet_decile_vs_tpm_mean_median.png"), p1_decile, width = 8, height = 5, dpi = 300)
+  fwrite(as.data.table(p1_decile_tbl), file.path(tables_dir, "plot1_shet_decile_vs_tpm_mean_median.tsv"), sep = "\t")
+
+  # Plot 2: TPM decile vs correlation(h2 RAW, h2 IRNT) for mean+median TPM deciles
+  p2_mean_tbl <- suite_tbl %>%
+    group_by(tpm_decile = mean_tpm_decile) %>%
+    summarise(
+      metric = "Mean TPM decile",
+      n_genes = n(),
+      cor_h2_raw_irnt = if_else(
+        n() >= 3,
+        cor(h2_raw, h2_irnt, method = cor_method, use = "pairwise.complete.obs"),
+        as.numeric(NA)
+      ),
+      .groups = "drop"
+    )
+
+  p2_median_tbl <- suite_tbl %>%
+    group_by(tpm_decile = median_tpm_decile) %>%
+    summarise(
+      metric = "Median TPM decile",
+      n_genes = n(),
+      cor_h2_raw_irnt = if_else(
+        n() >= 3,
+        cor(h2_raw, h2_irnt, method = cor_method, use = "pairwise.complete.obs"),
+        as.numeric(NA)
+      ),
+      .groups = "drop"
+    )
+
+  p2_tbl <- bind_rows(p2_mean_tbl, p2_median_tbl) %>%
+    arrange(metric, tpm_decile)
+
+  p2 <- ggplot(
+    p2_tbl,
+    aes(x = factor(tpm_decile), y = cor_h2_raw_irnt, color = metric, group = metric)
+  ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    labs(
+      title = "Correlation(h2 RAW, h2 IRNT) by TPM decile",
+      subtitle = paste0(suite_subtitle, " | correlation method: ", toupper(cor_method)),
+      x = "TPM decile (1-10)",
+      y = "Correlation(h2 RAW, h2 IRNT)",
+      color = "Decile definition"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+
+  ggsave(file.path(plots_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.png"), p2, width = 8, height = 5, dpi = 300)
+  fwrite(as.data.table(p2_tbl), file.path(tables_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.tsv"), sep = "\t")
+
+  # Plot 3: Shet vs RAW+IRNT h2
+  if (shet_x_mode %in% c("actual", "both")) {
+    plot_h2_shet(
+      df = suite_tbl,
+      x_mode = "actual",
+      out_file = file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png")
+    )
+  }
+
+  if (shet_x_mode %in% c("decile", "both")) {
+    plot_h2_shet(
+      df = suite_tbl,
+      x_mode = "decile",
+      out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_mean_median_lines.png")
+    )
+  }
+
+  fwrite(as.data.table(suite_tbl), file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"), sep = "\t")
+
+  message("Saved outputs in: ", suite_root)
+  message("Plots:")
+  message(" - ", file.path(plots_dir, "plot1_shet_decile_vs_tpm_mean_median.png"))
+  message(" - ", file.path(plots_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.png"))
+  message(" - ", file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png"))
+  message(" - ", file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_mean_median_lines.png"))
+  message("Tables:")
+  message(" - ", file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"))
+  message(" - ", file.path(tables_dir, "plot1_shet_decile_vs_tpm_mean_median.tsv"))
+  message(" - ", file.path(tables_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.tsv"))
 }
 
 # --------------------------------------------------
@@ -282,130 +442,48 @@ shet_tbl <- shet_tbl %>%
   group_by(Gene) %>%
   summarise(post_mean = mean(post_mean, na.rm = TRUE), .groups = "drop")
 
-mean_tpm_tbl <- read_mean_expression_by_gene(tpm_run_dir, out_col_name = "mean_tpm")
+h2_filter_note <- paste0("Low-h2 filter reference cutoff from prior scripts: h2 > ", format(h2_low_cutoff, scientific = FALSE))
+message(h2_filter_note)
+
+tpm_metrics_tbl <- read_tpm_metrics_by_gene(tpm_run_dir)
 h2_raw_tbl <- read_h2_by_gene(raw_run_dir, h2_col_name = "h2_raw")
 h2_irnt_tbl <- read_h2_by_gene(irnt_run_dir, h2_col_name = "h2_irnt")
 
 merged_tbl <- shet_tbl %>%
-  inner_join(mean_tpm_tbl, by = "Gene") %>%
+  inner_join(tpm_metrics_tbl, by = "Gene") %>%
   inner_join(h2_raw_tbl, by = "Gene") %>%
-  inner_join(h2_irnt_tbl, by = "Gene") %>%
-  mutate(
-    post_mean_bin = ntile(post_mean, 10),
-    tpm_bin = ntile(mean_tpm, tpm_cor_bins)
-  )
+  inner_join(h2_irnt_tbl, by = "Gene")
 
 if (nrow(merged_tbl) == 0L) {
-  stop("No overlapping genes after merging Shet, mean TPM, h2 RAW, and h2 IRNT.")
+  stop("No overlapping genes after merging Shet, mean/median TPM, h2 RAW, and h2 IRNT.")
 }
 
-if (n_distinct(merged_tbl$post_mean_bin) < 3L) {
-  stop("Too few Shet bins after merge; check overlap and inputs.")
-}
+run_plot_suite(
+  df = merged_tbl,
+  suite_name = "all_genes",
+  suite_subtitle = "All PASS genes with Shet+TPM+h2 overlap"
+)
 
-# Plot 1: Shet vs mean TPM
-if (shet_x_mode %in% c("actual", "both")) {
-  p1_actual <- ggplot(merged_tbl, aes(x = post_mean, y = mean_tpm)) +
-    geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
-    geom_smooth(method = "loess", se = TRUE, linewidth = 1, color = "#E76F51") +
-    labs(
-      title = "Mean TPM across s_het post_mean",
-      subtitle = "Gene-level scatter with LOESS trend",
-      x = "s_het post_mean",
-      y = "Mean TPM"
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
+filtered_tbl <- merged_tbl %>%
+  filter(h2_raw > h2_low_cutoff, h2_irnt > h2_low_cutoff)
 
-  ggsave(file.path(plots_dir, "plot1_shet_actual_vs_mean_tpm.png"), p1_actual, width = 8, height = 5, dpi = 300)
-}
-
-if (shet_x_mode %in% c("decile", "both")) {
-  p1_decile_tbl <- merged_tbl %>%
-    group_by(post_mean_bin) %>%
-    summarise(
-      n_genes = n(),
-      mean_tpm = mean(mean_tpm, na.rm = TRUE),
-      median_tpm = median(mean_tpm, na.rm = TRUE),
-      .groups = "drop"
-    ) %>%
-    arrange(post_mean_bin)
-
-  p1_decile <- ggplot(p1_decile_tbl, aes(x = factor(post_mean_bin), y = mean_tpm, group = 1)) +
-    geom_line(linewidth = 1, color = "#1D3557") +
-    geom_point(size = 2, color = "#1D3557") +
-    labs(
-      title = "Mean TPM by s_het decile",
-      subtitle = "Each point is a decile-level mean",
-      x = "s_het post_mean decile",
-      y = "Mean TPM"
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-
-  ggsave(file.path(plots_dir, "plot1_shet_decile_vs_mean_tpm.png"), p1_decile, width = 8, height = 5, dpi = 300)
-  fwrite(as.data.table(p1_decile_tbl), file.path(tables_dir, "plot1_shet_decile_vs_mean_tpm.tsv"), sep = "\t")
-}
-
-# Plot 2: mean TPM vs correlation(h2 RAW, h2 IRNT)
-p2_tbl <- merged_tbl %>%
-  group_by(tpm_bin) %>%
-  summarise(
-    n_genes = n(),
-    mean_tpm = mean(mean_tpm, na.rm = TRUE),
-    median_tpm = median(mean_tpm, na.rm = TRUE),
-    cor_h2_raw_irnt = if_else(
-      n() >= 3,
-      cor(h2_raw, h2_irnt, method = cor_method, use = "pairwise.complete.obs"),
-      as.numeric(NA)
-    ),
-    .groups = "drop"
-  ) %>%
-  arrange(mean_tpm)
-
-p2 <- ggplot(p2_tbl, aes(x = mean_tpm, y = cor_h2_raw_irnt)) +
-  geom_line(linewidth = 1, color = "#E76F51") +
-  geom_point(size = 2, color = "#E76F51") +
-  labs(
-    title = "Correlation between h2 RAW and h2 IRNT across TPM bins",
-    subtitle = paste0("Correlation method: ", toupper(cor_method), " | each point is a TPM bin"),
-    x = "Mean TPM (bin mean)",
-    y = "Correlation(h2 RAW, h2 IRNT)"
-  ) +
-  theme_minimal(base_size = 11) +
-  theme(panel.grid.minor = element_blank())
-
-ggsave(file.path(plots_dir, "plot2_mean_tpm_vs_h2_raw_irnt_correlation.png"), p2, width = 8, height = 5, dpi = 300)
-fwrite(as.data.table(p2_tbl), file.path(tables_dir, "plot2_mean_tpm_vs_h2_raw_irnt_correlation.tsv"), sep = "\t")
-
-# Plot 3: Shet vs RAW+IRNT h2 lines
-if (shet_x_mode %in% c("actual", "both")) {
-  plot_h2_shet(
-    df = merged_tbl,
-    x_mode = "actual",
-    out_file = file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png")
+if (nrow(filtered_tbl) < 100L) {
+  message(
+    "Low-h2 filtered set is small (n=", nrow(filtered_tbl), "). ",
+    "Still writing outputs, but interpret trends with caution."
   )
 }
 
-if (shet_x_mode %in% c("decile", "both")) {
-  plot_h2_shet(
-    df = merged_tbl,
-    x_mode = "decile",
-    out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_lines.png")
+if (nrow(filtered_tbl) >= 10L) {
+  run_plot_suite(
+    df = filtered_tbl,
+    suite_name = paste0("h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with h2 RAW > ", h2_low_cutoff, " and h2 IRNT > ", h2_low_cutoff)
+  )
+} else {
+  message(
+    "Skipping low-h2 filtered suite: too few genes after filtering (n=",
+    nrow(filtered_tbl),
+    ")."
   )
 }
-
-# Save merged gene-level table
-fwrite(as.data.table(merged_tbl), file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"), sep = "\t")
-
-message("Saved outputs in: ", analysis_root)
-message("Plots:")
-message(" - ", file.path(plots_dir, "plot1_shet_actual_vs_mean_tpm.png"))
-message(" - ", file.path(plots_dir, "plot1_shet_decile_vs_mean_tpm.png"))
-message(" - ", file.path(plots_dir, "plot2_mean_tpm_vs_h2_raw_irnt_correlation.png"))
-message(" - ", file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png"))
-message(" - ", file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_lines.png"))
-message("Tables:")
-message(" - ", file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"))
-message(" - ", file.path(tables_dir, "plot1_shet_decile_vs_mean_tpm.tsv"))
-message(" - ", file.path(tables_dir, "plot2_mean_tpm_vs_h2_raw_irnt_correlation.tsv"))
