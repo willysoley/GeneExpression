@@ -208,17 +208,28 @@ plot_h2_shet <- function(df, x_mode, out_file) {
     mutate(h2_type = recode(h2_type, h2_raw = "RAW", h2_irnt = "IRNT"))
 
   if (x_mode == "actual") {
-    p <- ggplot(h2_long, aes(x = post_mean, y = h2, color = h2_type)) +
-      geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
+    p <- ggplot(h2_long, aes(x = post_mean, y = h2)) +
+      stat_density_2d_filled(
+        aes(fill = after_stat(level)),
+        contour_var = "ndensity",
+        alpha = 0.4,
+        show.legend = FALSE
+      ) +
+      geom_point(aes(color = h2_type), alpha = 0.35, size = 0.7) +
+      facet_wrap(~h2_type, ncol = 2, scales = "free_y") +
       labs(
         title = "h2 (RAW vs IRNT) across s_het post_mean",
-        subtitle = "LOESS trend lines on gene-level values",
+        subtitle = "Dots + density clouds on gene-level values",
         x = "s_het post_mean",
         y = "h2_GREML",
         color = "Normalization"
       ) +
       theme_minimal(base_size = 11) +
-      theme(panel.grid.minor = element_blank())
+      theme(
+        panel.grid.minor = element_blank(),
+        strip.text = element_text(face = "bold")
+      ) +
+      scale_color_manual(values = c("RAW" = "#1D3557", "IRNT" = "#E76F51"))
   } else {
     decile_tbl <- h2_long %>%
       group_by(post_mean_bin, h2_type) %>%
@@ -300,11 +311,16 @@ if (n_distinct(merged_tbl$post_mean_bin) < 3L) {
 # Plot 1: Shet vs mean TPM
 if (shet_x_mode %in% c("actual", "both")) {
   p1_actual <- ggplot(merged_tbl, aes(x = post_mean, y = mean_tpm)) +
-    geom_point(alpha = 0.25, size = 0.8, color = "#2A9D8F") +
-    geom_smooth(method = "loess", se = TRUE, linewidth = 1, color = "#264653") +
+    stat_density_2d_filled(
+      aes(fill = after_stat(level)),
+      contour_var = "ndensity",
+      alpha = 0.45,
+      show.legend = FALSE
+    ) +
+    geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
     labs(
       title = "Mean TPM across s_het post_mean",
-      subtitle = "Points are genes; line is LOESS trend",
+      subtitle = "Dots + density cloud",
       x = "s_het post_mean",
       y = "Mean TPM"
     ) +
