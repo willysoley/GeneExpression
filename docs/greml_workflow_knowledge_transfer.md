@@ -1,6 +1,6 @@
 # GEUVADIS Gene Expression GREML Workflow Handoff
 
-Last updated: 2026-05-21
+Last updated: 2026-05-26
 
 This document is a knowledge-transfer guide for the GEUVADIS gene expression
 heritability workflow in this repository. It is written for the next person who
@@ -47,6 +47,24 @@ The summary TSV files are the primary scientific outputs. The phenotype,
 qcovar, gene map, GRM, and PCA files are the primary audit/provenance outputs.
 The `_analysis` plots are diagnostic and interpretive products built from the
 published run outputs.
+
+Important source files for this handoff:
+
+```text
+docs/greml_workflow_knowledge_transfer.md
+docs/greml_workflow_knowledge_transfer.pdf
+scripts/render_greml_workflow_knowledge_transfer_pdf.R
+```
+
+The markdown file is the source of truth. The PDF is the shareable handoff
+artifact. Regenerate the PDF after editing the markdown.
+
+Regenerate command from the local repository checkout:
+
+```bash
+cd /Users/sl8085/Documents/MostafaviLab/Git/GeneExpression
+Rscript scripts/render_greml_workflow_knowledge_transfer_pdf.R
+```
 
 ## If You Only Read One Page
 
@@ -1072,14 +1090,27 @@ It did the following:
 
 1. Build a Salmon transcriptome index from the cDNA fasta.
 2. Build a `tx2gene.tsv` map from the GTF.
-3. Run `salmon quant` per GEUVADIS FASTQ using:
+3. Run `salmon quant` per GEUVADIS FASTQ in single-end mode with automatic
+   library-type detection and gene-level aggregation:
 
 ```text
---validateMappings
---seqBias
---gcBias
+salmon quant
+-l A
+-r <FASTQ>
 --geneMap tx2gene.tsv
 ```
+
+Current upstream caveat:
+
+```text
+The current GEUVADIS_Salmon pipeline has params.extra_quant = "".
+```
+
+That means the current reproducible upstream Salmon run does not add
+`--validateMappings`, `--seqBias`, or `--gcBias`. If a future analyst adds those
+flags, they should treat the resulting matrices as a new expression
+quantification version and rerun all downstream GREML phenotypes rather than
+mixing them with the current matrices.
 
 4. Merge per-sample `quant.genes.sf` into:
 
@@ -1111,6 +1142,39 @@ The Slurm driver is:
 ```text
 run_greml.sh
 ```
+
+### GCTA input contract
+
+At the moment GCTA runs, each gene-level GREML task needs exactly three
+scientific inputs plus one gene index:
+
+```text
+genotype_grm.*
+pheno_<runLabel>.phenotypes.tsv
+pheno_<runLabel>.qcovar
+pheno_<runLabel>.gene_index_map.txt
+```
+
+The GRM defines genetic similarity among the kept individuals. The phenotype
+file contains one expression phenotype column per gene, with no header because
+GCTA expects FID/IID followed by phenotype columns. The qcovar file contains the
+same FID/IID sample order plus quantitative covariates, mainly genotype PCs and
+PEER factors. The gene index map is the human-readable bridge between an
+Ensembl gene ID and the `--mpheno` column index used by GCTA.
+
+The biological requirement is that all three sample-indexed inputs must describe
+the same individuals:
+
+```text
+GRM sample order
+phenotype FID/IID rows
+qcovar FID/IID rows
+```
+
+If these disagree, GCTA can fail outright or estimate h2 on the wrong sample
+intersection. This is why sample filtering, unrelated-sample pruning, PCA, PEER,
+phenotype creation, and GRM creation must be treated as one coherent input
+bundle.
 
 ### Step 1: Slurm driver and fanout
 
