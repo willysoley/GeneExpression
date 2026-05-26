@@ -209,17 +209,11 @@ plot_h2_shet <- function(df, x_mode, out_file) {
 
   if (x_mode == "actual") {
     p <- ggplot(h2_long, aes(x = post_mean, y = h2)) +
-      stat_density_2d_filled(
-        aes(fill = after_stat(level)),
-        contour_var = "ndensity",
-        alpha = 0.4,
-        show.legend = FALSE
-      ) +
       geom_point(aes(color = h2_type), alpha = 0.35, size = 0.7) +
       facet_wrap(~h2_type, ncol = 2, scales = "free_y") +
       labs(
         title = "h2 (RAW vs IRNT) across s_het post_mean",
-        subtitle = "Dots + density clouds on gene-level values",
+        subtitle = "Gene-level scatter (no smoothing)",
         x = "s_het post_mean",
         y = "h2_GREML",
         color = "Normalization"
@@ -311,16 +305,10 @@ if (n_distinct(merged_tbl$post_mean_bin) < 3L) {
 # Plot 1: Shet vs mean TPM
 if (shet_x_mode %in% c("actual", "both")) {
   p1_actual <- ggplot(merged_tbl, aes(x = post_mean, y = mean_tpm)) +
-    stat_density_2d_filled(
-      aes(fill = after_stat(level)),
-      contour_var = "ndensity",
-      alpha = 0.45,
-      show.legend = FALSE
-    ) +
     geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
     labs(
       title = "Mean TPM across s_het post_mean",
-      subtitle = "Dots + density cloud",
+      subtitle = "Gene-level scatter (no smoothing)",
       x = "s_het post_mean",
       y = "Mean TPM"
     ) +
