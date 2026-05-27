@@ -93,7 +93,11 @@ if (!is.finite(h2_frac_cutoff) || h2_frac_cutoff < 0) {
 run_branch_specific_plots <- tolower(Sys.getenv("RUN_BRANCH_SPECIFIC_PLOTS", "false")) %in% c("1", "true", "yes", "y")
 apply_epsilon_filter <- tolower(Sys.getenv("APPLY_EPSILON_FILTER", "true")) %in% c("1", "true", "yes", "y")
 
-analysis_root <- file.path(runs_dir, "_analysis", paste0("shet_tmm_h2_plots_v1_", norm2_tag))
+analysis_label <- Sys.getenv("ANALYSIS_LABEL", "")
+if (!nzchar(analysis_label)) {
+  analysis_label <- paste0("shet_tmm_h2_plots_v1_", norm2_tag)
+}
+analysis_root <- file.path(runs_dir, "_analysis", analysis_label)
 dir.create(analysis_root, recursive = TRUE, showWarnings = FALSE)
 
 # --------------------------------------------------
