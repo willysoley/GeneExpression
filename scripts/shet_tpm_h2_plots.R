@@ -65,10 +65,7 @@ if (!nzchar(tpm_mean_method)) {
   }
 }
 
-shet_x_mode <- tolower(Sys.getenv("SHET_X_MODE", "both")) # one of: actual, decile, both
-if (!shet_x_mode %in% c("actual", "decile", "both")) {
-  stop("SHET_X_MODE must be one of: actual, decile, both")
-}
+shet_x_mode <- "decile"
 
 n_deciles <- suppressWarnings(as.integer(Sys.getenv("N_DECILES", "10")))
 if (!is.finite(n_deciles) || n_deciles != 10L) {
@@ -237,7 +234,7 @@ read_tpm_metrics_by_gene <- function(run_dir) {
     )
 }
 
-plot_h2_shet <- function(df, x_mode, out_file) {
+plot_h2_shet <- function(df, out_file) {
   h2_long <- df %>%
     select(post_mean, post_mean_bin, h2_tmm_raw, h2_tmm_irnt) %>%
     pivot_longer(
@@ -247,67 +244,47 @@ plot_h2_shet <- function(df, x_mode, out_file) {
     ) %>%
     mutate(h2_type = recode(h2_type, h2_tmm_raw = "RAW", h2_tmm_irnt = "IRNT"))
 
-  if (x_mode == "actual") {
-    p <- ggplot(h2_long, aes(x = post_mean, y = h2)) +
-      geom_point(aes(color = h2_type), alpha = 0.35, size = 0.7) +
-      geom_smooth(aes(color = h2_type), method = "loess", se = FALSE, linewidth = 1) +
-      facet_wrap(~h2_type, ncol = 2, scales = "free_y") +
-      labs(
-        title = "TMM h2 (RAW vs IRNT) across s_het post_mean",
-        subtitle = "Gene-level scatter with LOESS trend",
-        x = "s_het post_mean",
-        y = "h2_GREML",
-        color = "Normalization"
-      ) +
-      theme_minimal(base_size = 11) +
-      theme(
-        panel.grid.minor = element_blank(),
-        strip.text = element_text(face = "bold")
-      ) +
-      scale_color_manual(values = c("RAW" = "#1D3557", "IRNT" = "#E76F51"))
-  } else {
-    decile_tbl <- h2_long %>%
-      group_by(post_mean_bin, h2_type) %>%
-      summarise(
-        mean_h2 = mean(h2, na.rm = TRUE),
-        median_h2 = median(h2, na.rm = TRUE),
-        n_genes = n(),
-        .groups = "drop"
-      )
+  decile_tbl <- h2_long %>%
+    group_by(post_mean_bin, h2_type) %>%
+    summarise(
+      mean_h2 = mean(h2, na.rm = TRUE),
+      median_h2 = median(h2, na.rm = TRUE),
+      n_genes = n(),
+      .groups = "drop"
+    )
 
-    decile_long <- decile_tbl %>%
-      pivot_longer(
-        cols = c(mean_h2, median_h2),
-        names_to = "stat_type",
-        values_to = "h2_value"
-      ) %>%
-      mutate(
-        stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2")
-      )
+  decile_long <- decile_tbl %>%
+    pivot_longer(
+      cols = c(mean_h2, median_h2),
+      names_to = "stat_type",
+      values_to = "h2_value"
+    ) %>%
+    mutate(
+      stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2")
+    )
 
-    p <- ggplot(
-      decile_long,
-      aes(
-        x = factor(post_mean_bin),
-        y = h2_value,
-        color = h2_type,
-        linetype = stat_type,
-        group = interaction(h2_type, stat_type)
-      )
+  p <- ggplot(
+    decile_long,
+    aes(
+      x = factor(post_mean_bin),
+      y = h2_value,
+      color = h2_type,
+      linetype = stat_type,
+      group = interaction(h2_type, stat_type)
+    )
+  ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    labs(
+      title = "TMM h2 (RAW vs IRNT): mean and median by s_het decile",
+      subtitle = "Deciles recalculated after merge (1 = lowest, 10 = highest s_het)",
+      x = "s_het post_mean decile",
+      y = "h2_GREML",
+      color = "Normalization",
+      linetype = "Summary"
     ) +
-      geom_line(linewidth = 1) +
-      geom_point(size = 1.8) +
-      labs(
-        title = "TMM h2 (RAW vs IRNT): mean and median by s_het decile",
-        subtitle = "Each point is a decile-level summary",
-        x = "s_het post_mean decile",
-        y = "h2_GREML",
-        color = "Normalization",
-        linetype = "Summary"
-      ) +
-      theme_minimal(base_size = 11) +
-      theme(panel.grid.minor = element_blank())
-  }
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
 
   ggsave(out_file, p, width = 8, height = 5, dpi = 300)
 }
@@ -325,33 +302,6 @@ run_plot_suite_pair <- function(df, suite_name, suite_subtitle) {
       mean_tpm_decile = ntile(mean_tpm, n_deciles),
       median_tpm_decile = ntile(median_tpm, n_deciles)
     )
-
-  # Non-decile scatter views (gene-level dots)
-  p_scatter_shet_tpm <- ggplot(suite_tbl, aes(x = post_mean, y = mean_tpm)) +
-    geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
-    labs(
-      title = "Gene-level scatter: s_het post_mean vs mean TPM",
-      subtitle = suite_subtitle,
-      x = "s_het post_mean",
-      y = "Mean TPM"
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "scatter_shet_vs_mean_tpm.png"), p_scatter_shet_tpm, width = 8, height = 5, dpi = 300)
-
-  p_scatter_h2_pair <- ggplot(suite_tbl, aes(x = h2_tmm_raw, y = h2_tmm_irnt)) +
-    geom_point(alpha = 0.3, size = 0.7, color = "#2A6F9E") +
-    geom_smooth(method = "lm", se = FALSE, linewidth = 1, color = "#B22222") +
-    labs(
-      title = "Gene-level scatter: TMM h2 RAW vs TMM h2 IRNT",
-      subtitle = suite_subtitle,
-      x = "TMM h2 RAW",
-      y = "TMM h2 IRNT"
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "scatter_h2_raw_vs_irnt.png"), p_scatter_h2_pair, width = 8, height = 5, dpi = 300)
 
   # Plot 1: Shet decile vs mean/median TPM
   p1_decile_tbl <- suite_tbl %>%
@@ -442,22 +392,11 @@ run_plot_suite_pair <- function(df, suite_name, suite_subtitle) {
   ggsave(file.path(plots_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.png"), p2, width = 8, height = 5, dpi = 300)
   fwrite(as.data.table(p2_tbl), file.path(tables_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.tsv"), sep = "\t")
 
-  # Plot 3: Shet vs RAW+IRNT h2
-  if (shet_x_mode %in% c("actual", "both")) {
-    plot_h2_shet(
-      df = suite_tbl,
-      x_mode = "actual",
-      out_file = file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png")
-    )
-  }
-
-  if (shet_x_mode %in% c("decile", "both")) {
-    plot_h2_shet(
-      df = suite_tbl,
-      x_mode = "decile",
-      out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_mean_median_lines.png")
-    )
-  }
+  # Plot 3: Shet decile vs RAW+IRNT h2 (decile only)
+  plot_h2_shet(
+    df = suite_tbl,
+    out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_mean_median_lines.png")
+  )
 
   fwrite(as.data.table(suite_tbl), file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"), sep = "\t")
 
@@ -465,10 +404,7 @@ run_plot_suite_pair <- function(df, suite_name, suite_subtitle) {
   message("Plots:")
   message(" - ", file.path(plots_dir, "plot1_shet_decile_vs_tpm_mean_median.png"))
   message(" - ", file.path(plots_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.png"))
-  message(" - ", file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png"))
   message(" - ", file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_mean_median_lines.png"))
-  message(" - ", file.path(plots_dir, "scatter_shet_vs_mean_tpm.png"))
-  message(" - ", file.path(plots_dir, "scatter_h2_raw_vs_irnt.png"))
   message("Tables:")
   message(" - ", file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"))
   message(" - ", file.path(tables_dir, "plot1_shet_decile_vs_tpm_mean_median.tsv"))
@@ -579,15 +515,17 @@ run_decile_sensitivity_pair <- function(
   p_dual <- ggplot(dual_tbl, aes(x = post_mean_bin)) +
     geom_line(aes(y = mean_h2_raw), color = "#2A6F9E", linewidth = 1) +
     geom_point(aes(y = mean_h2_raw), color = "#2A6F9E", size = 1.8, alpha = 0.8) +
+    geom_line(aes(y = median_h2_raw), color = "#2A6F9E", linewidth = 1, linetype = "dashed") +
+    geom_point(aes(y = median_h2_raw), color = "#2A6F9E", size = 1.5, alpha = 0.8, shape = 1) +
     geom_line(aes(y = frac_scaled), color = "#B22222", linewidth = 1) +
     geom_point(aes(y = frac_scaled), color = "#B22222", size = 1.8, alpha = 0.8) +
     scale_x_continuous(breaks = 1:10) +
     facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = "Decile sensitivity recreation view",
-      subtitle = paste0(suite_subtitle, " | blue = mean h2 RAW, red = fraction h2 TMM RAW > ", h2_frac_cutoff),
+      subtitle = paste0(suite_subtitle, " | blue solid = mean h2 RAW, blue dashed = median h2 RAW, red = fraction h2 TMM RAW > ", h2_frac_cutoff),
       x = "Decile of selective constraint",
-      y = "Mean expression h2 (RAW); decile 10 = highest constraint"
+      y = "Expression h2 (RAW); decile 10 = highest constraint"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
@@ -641,19 +579,35 @@ run_decile_sensitivity_pair <- function(
   )
 
   h2_lines <- sens_decile_summary %>%
-    select(decile_source, decile_direction, post_mean_bin, mean_h2_raw, mean_h2_irnt) %>%
-    pivot_longer(cols = c(mean_h2_raw, mean_h2_irnt), names_to = "metric", values_to = "value") %>%
-    mutate(metric = recode(metric, mean_h2_raw = "Mean h2 RAW", mean_h2_irnt = "Mean h2 IRNT"))
+    select(
+      decile_source, decile_direction, post_mean_bin,
+      mean_h2_raw, median_h2_raw,
+      mean_h2_irnt, median_h2_irnt
+    ) %>%
+    pivot_longer(
+      cols = c(mean_h2_raw, median_h2_raw, mean_h2_irnt, median_h2_irnt),
+      names_to = "metric",
+      values_to = "value"
+    ) %>%
+    mutate(
+      metric = recode(
+        metric,
+        mean_h2_raw = "Mean h2 RAW",
+        median_h2_raw = "Median h2 RAW",
+        mean_h2_irnt = "Mean h2 IRNT",
+        median_h2_irnt = "Median h2 IRNT"
+      )
+    )
 
   p_h2_sens <- ggplot(h2_lines, aes(x = factor(post_mean_bin), y = value, color = metric, group = metric)) +
     geom_line(linewidth = 0.9) +
     geom_point(size = 1.7) +
     facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
-      title = "Mean h2 trend by decile definition",
+      title = "Mean and median h2 trend by decile definition",
       subtitle = suite_subtitle,
       x = "s_het decile (1-10)",
-      y = "Mean h2",
+      y = "h2",
       color = "Metric"
     ) +
     theme_minimal(base_size = 11) +
@@ -668,7 +622,7 @@ run_decile_sensitivity_pair <- function(
   )
 }
 
-plot_h2_shet_single <- function(df, x_mode, h2_col, h2_label, out_file) {
+plot_h2_shet_single <- function(df, h2_col, h2_label, out_file) {
   plot_df <- df %>%
     transmute(
       post_mean = post_mean,
@@ -677,46 +631,32 @@ plot_h2_shet_single <- function(df, x_mode, h2_col, h2_label, out_file) {
     ) %>%
     filter(is.finite(post_mean), is.finite(h2))
 
-  if (x_mode == "actual") {
-    p <- ggplot(plot_df, aes(x = post_mean, y = h2)) +
-      geom_point(alpha = 0.35, size = 0.7, color = "#1D3557") +
-      geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
-      labs(
-        title = paste0("TMM h2 ", h2_label, " across s_het post_mean"),
-        subtitle = "Gene-level scatter with LOESS trend",
-        x = "s_het post_mean",
-        y = "h2_GREML"
-      ) +
-      theme_minimal(base_size = 11) +
-      theme(panel.grid.minor = element_blank())
-  } else {
-    decile_tbl <- plot_df %>%
-      group_by(post_mean_bin) %>%
-      summarise(
-        mean_h2 = mean(h2, na.rm = TRUE),
-        median_h2 = median(h2, na.rm = TRUE),
-        .groups = "drop"
-      ) %>%
-      pivot_longer(
-        cols = c(mean_h2, median_h2),
-        names_to = "stat_type",
-        values_to = "h2_value"
-      ) %>%
-      mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
+  decile_tbl <- plot_df %>%
+    group_by(post_mean_bin) %>%
+    summarise(
+      mean_h2 = mean(h2, na.rm = TRUE),
+      median_h2 = median(h2, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(
+      cols = c(mean_h2, median_h2),
+      names_to = "stat_type",
+      values_to = "h2_value"
+    ) %>%
+    mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
 
-    p <- ggplot(decile_tbl, aes(x = factor(post_mean_bin), y = h2_value, linetype = stat_type, group = stat_type)) +
-      geom_line(linewidth = 1, color = "#1D3557") +
-      geom_point(size = 1.8, color = "#1D3557") +
-      labs(
-        title = paste0("TMM h2 ", h2_label, ": mean and median by s_het decile"),
-        subtitle = "Each point is a decile-level summary",
-        x = "s_het post_mean decile",
-        y = "h2_GREML",
-        linetype = "Summary"
-      ) +
-      theme_minimal(base_size = 11) +
-      theme(panel.grid.minor = element_blank())
-  }
+  p <- ggplot(decile_tbl, aes(x = factor(post_mean_bin), y = h2_value, linetype = stat_type, group = stat_type)) +
+    geom_line(linewidth = 1, color = "#1D3557") +
+    geom_point(size = 1.8, color = "#1D3557") +
+    labs(
+      title = paste0("TMM h2 ", h2_label, ": mean and median by s_het decile"),
+      subtitle = "Deciles recalculated after merge (1 = lowest, 10 = highest s_het)",
+      x = "s_het post_mean decile",
+      y = "h2_GREML",
+      linetype = "Summary"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
 
   ggsave(out_file, p, width = 8, height = 5, dpi = 300)
 }
@@ -734,33 +674,6 @@ run_plot_suite_single <- function(df, h2_col, h2_label, suite_name, suite_subtit
       mean_tpm_decile = ntile(mean_tpm, n_deciles),
       median_tpm_decile = ntile(median_tpm, n_deciles)
     )
-
-  # Non-decile scatter views (gene-level dots)
-  p_scatter_shet_tpm <- ggplot(suite_tbl, aes(x = post_mean, y = mean_tpm)) +
-    geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
-    labs(
-      title = "Gene-level scatter: s_het post_mean vs mean TPM",
-      subtitle = paste0(suite_subtitle, " | h2 branch: ", h2_label),
-      x = "s_het post_mean",
-      y = "Mean TPM"
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "scatter_shet_vs_mean_tpm.png"), p_scatter_shet_tpm, width = 8, height = 5, dpi = 300)
-
-  p_scatter_tpm_h2 <- ggplot(suite_tbl, aes(x = mean_tpm, y = .data[[h2_col]])) +
-    geom_point(alpha = 0.3, size = 0.7, color = "#2A6F9E") +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#B22222") +
-    labs(
-      title = paste0("Gene-level scatter: mean TPM vs TMM h2 ", h2_label),
-      subtitle = suite_subtitle,
-      x = "Mean TPM",
-      y = paste0("TMM h2 ", h2_label)
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "scatter_mean_tpm_vs_h2_single_norm.png"), p_scatter_tpm_h2, width = 8, height = 5, dpi = 300)
 
   p1_decile_tbl <- suite_tbl %>%
     group_by(post_mean_bin) %>%
@@ -792,25 +705,12 @@ run_plot_suite_single <- function(df, h2_col, h2_label, suite_name, suite_subtit
   ggsave(file.path(plots_dir, "plot1_shet_decile_vs_tpm_mean_median.png"), p1_decile, width = 8, height = 5, dpi = 300)
   fwrite(as.data.table(p1_decile_tbl), file.path(tables_dir, "plot1_shet_decile_vs_tpm_mean_median.tsv"), sep = "\t")
 
-  if (shet_x_mode %in% c("actual", "both")) {
-    plot_h2_shet_single(
-      df = suite_tbl,
-      x_mode = "actual",
-      h2_col = h2_col,
-      h2_label = h2_label,
-      out_file = file.path(plots_dir, "plot3_shet_actual_vs_h2_single_norm.png")
-    )
-  }
-
-  if (shet_x_mode %in% c("decile", "both")) {
-    plot_h2_shet_single(
-      df = suite_tbl,
-      x_mode = "decile",
-      h2_col = h2_col,
-      h2_label = h2_label,
-      out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_single_norm_mean_median_lines.png")
-    )
-  }
+  plot_h2_shet_single(
+    df = suite_tbl,
+    h2_col = h2_col,
+    h2_label = h2_label,
+    out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_single_norm_mean_median_lines.png")
+  )
 
   fwrite(as.data.table(suite_tbl), file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"), sep = "\t")
 }
@@ -864,15 +764,17 @@ run_decile_sensitivity_single <- function(df, h2_col, h2_label, suite_name, suit
   p_dual <- ggplot(dual_tbl, aes(x = post_mean_bin)) +
     geom_line(aes(y = mean_h2), color = "#2A6F9E", linewidth = 1) +
     geom_point(aes(y = mean_h2), color = "#2A6F9E", size = 1.8, alpha = 0.8) +
+    geom_line(aes(y = median_h2), color = "#2A6F9E", linewidth = 1, linetype = "dashed") +
+    geom_point(aes(y = median_h2), color = "#2A6F9E", size = 1.5, alpha = 0.8, shape = 1) +
     geom_line(aes(y = frac_scaled), color = "#B22222", linewidth = 1) +
     geom_point(aes(y = frac_scaled), color = "#B22222", size = 1.8, alpha = 0.8) +
     scale_x_continuous(breaks = 1:10) +
     facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = paste0("Decile sensitivity recreation view (", h2_label, ")"),
-      subtitle = paste0(suite_subtitle, " | blue = mean h2, red = fraction h2 > ", h2_frac_cutoff),
+      subtitle = paste0(suite_subtitle, " | blue solid = mean h2, blue dashed = median h2, red = fraction h2 > ", h2_frac_cutoff),
       x = "Decile of selective constraint",
-      y = "Mean expression h2; decile 10 = highest constraint"
+      y = "Expression h2; decile 10 = highest constraint"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
@@ -896,8 +798,8 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
     return(invisible(NULL))
   }
 
-  long_actual <- tbl %>%
-    select(Gene, post_mean, post_mean_bin, all_of(c(h2_tmm_col, h2_tpm_col))) %>%
+  long_decile <- tbl %>%
+    select(Gene, post_mean_bin, all_of(c(h2_tmm_col, h2_tpm_col))) %>%
     pivot_longer(
       cols = all_of(c(h2_tmm_col, h2_tpm_col)),
       names_to = "h2_source",
@@ -907,21 +809,7 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
       h2_source = recode(h2_source, !!h2_tmm_col := "TMM", !!h2_tpm_col := "TPM")
     )
 
-  p_actual <- ggplot(long_actual, aes(x = post_mean, y = h2, color = h2_source)) +
-    geom_point(alpha = 0.35, size = 0.7) +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
-    labs(
-      title = paste0("h2 source comparison (", norm_label, "): TPM vs TMM"),
-      subtitle = suite_subtitle,
-      x = "s_het post_mean",
-      y = "h2_GREML",
-      color = "Expression source"
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, paste0("plot_h2_source_actual_", tolower(norm_label), ".png")), p_actual, width = 8, height = 5, dpi = 300)
-
-  decile_tbl <- long_actual %>%
+  decile_tbl <- long_decile %>%
     group_by(post_mean_bin, h2_source) %>%
     summarise(
       mean_h2 = mean(h2, na.rm = TRUE),
@@ -960,20 +848,6 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
     theme(panel.grid.minor = element_blank())
   ggsave(file.path(plots_dir, paste0("plot_h2_source_decile_", tolower(norm_label), ".png")), p_decile, width = 8, height = 5, dpi = 300)
 
-  p_scatter <- ggplot(tbl, aes(x = .data[[h2_tmm_col]], y = .data[[h2_tpm_col]])) +
-    geom_point(alpha = 0.35, size = 0.7, color = "#2A6F9E") +
-    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#B22222", linewidth = 0.8) +
-    geom_smooth(method = "lm", se = FALSE, color = "#264653", linewidth = 1) +
-    labs(
-      title = paste0("TPM vs TMM h2 scatter (", norm_label, ")"),
-      subtitle = suite_subtitle,
-      x = paste0("TMM h2 ", norm_label),
-      y = paste0("TPM h2 ", norm_label)
-    ) +
-    theme_minimal(base_size = 11) +
-    theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, paste0("scatter_h2_tpm_vs_tmm_", tolower(norm_label), ".png")), p_scatter, width = 8, height = 5, dpi = 300)
-
   fwrite(as.data.table(tbl), file.path(tables_dir, paste0("h2_source_comparison_", tolower(norm_label), "_gene_level.tsv")), sep = "\t")
 }
 
@@ -985,15 +859,18 @@ run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "she
   dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
 
   tmm_plot_tbl <- tmm_tbl %>%
-    select(Gene, post_mean, h2_tmm_raw) %>%
+    mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
+    select(Gene, post_mean, post_mean_bin, h2_tmm_raw) %>%
     filter(is.finite(post_mean), is.finite(h2_tmm_raw))
 
   tpm_plot_tbl <- tpm_tbl %>%
-    select(Gene, post_mean, h2_tpm_raw) %>%
+    mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
+    select(Gene, post_mean, post_mean_bin, h2_tpm_raw) %>%
     filter(is.finite(post_mean), is.finite(h2_tpm_raw))
 
   overlap_long <- overlap_tbl %>%
-    select(Gene, post_mean, h2_tmm_raw, h2_tpm_raw) %>%
+    mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
+    select(Gene, post_mean, post_mean_bin, h2_tmm_raw, h2_tpm_raw) %>%
     filter(is.finite(post_mean), is.finite(h2_tmm_raw), is.finite(h2_tpm_raw)) %>%
     pivot_longer(
       cols = c(h2_tmm_raw, h2_tpm_raw),
@@ -1002,39 +879,77 @@ run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "she
     ) %>%
     mutate(source = recode(source, h2_tmm_raw = "TMM", h2_tpm_raw = "TPM"))
 
-  p_tmm <- ggplot(tmm_plot_tbl, aes(x = post_mean, y = h2_tmm_raw)) +
-    geom_point(alpha = 0.35, size = 0.7, color = "#1D3557") +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
+  tmm_decile <- tmm_plot_tbl %>%
+    group_by(post_mean_bin) %>%
+    summarise(
+      mean_h2 = mean(h2_tmm_raw, na.rm = TRUE),
+      median_h2 = median(h2_tmm_raw, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(cols = c(mean_h2, median_h2), names_to = "stat_type", values_to = "h2_value") %>%
+    mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
+
+  p_tmm <- ggplot(tmm_decile, aes(x = factor(post_mean_bin), y = h2_value, linetype = stat_type, group = stat_type)) +
+    geom_line(linewidth = 1, color = "#1D3557") +
+    geom_point(size = 1.8, color = "#1D3557") +
     labs(
-      title = "s_het vs h2 (TMM RAW)",
-      x = "s_het post_mean",
-      y = "h2_GREML"
+      title = "s_het decile vs h2 (TMM RAW)",
+      subtitle = "Deciles recalculated after TMM merge",
+      x = "s_het post_mean decile (1-10)",
+      y = "h2_GREML",
+      linetype = "Summary"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
   ggsave(file.path(plots_dir, "plot1_shet_vs_h2_tmm_raw.png"), p_tmm, width = 8, height = 5, dpi = 300)
 
-  p_tpm <- ggplot(tpm_plot_tbl, aes(x = post_mean, y = h2_tpm_raw)) +
-    geom_point(alpha = 0.35, size = 0.7, color = "#2A6F9E") +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#B22222") +
+  tpm_decile <- tpm_plot_tbl %>%
+    group_by(post_mean_bin) %>%
+    summarise(
+      mean_h2 = mean(h2_tpm_raw, na.rm = TRUE),
+      median_h2 = median(h2_tpm_raw, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(cols = c(mean_h2, median_h2), names_to = "stat_type", values_to = "h2_value") %>%
+    mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
+
+  p_tpm <- ggplot(tpm_decile, aes(x = factor(post_mean_bin), y = h2_value, linetype = stat_type, group = stat_type)) +
+    geom_line(linewidth = 1, color = "#2A6F9E") +
+    geom_point(size = 1.8, color = "#2A6F9E") +
     labs(
-      title = "s_het vs h2 (TPM RAW)",
-      x = "s_het post_mean",
-      y = "h2_GREML"
+      title = "s_het decile vs h2 (TPM RAW)",
+      subtitle = "Deciles recalculated after TPM merge",
+      x = "s_het post_mean decile (1-10)",
+      y = "h2_GREML",
+      linetype = "Summary"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
   ggsave(file.path(plots_dir, "plot2_shet_vs_h2_tpm_raw.png"), p_tpm, width = 8, height = 5, dpi = 300)
 
-  p_overlap <- ggplot(overlap_long, aes(x = post_mean, y = h2, color = source)) +
-    geom_point(alpha = 0.30, size = 0.65) +
-    geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
+  overlap_decile <- overlap_long %>%
+    group_by(post_mean_bin, source) %>%
+    summarise(
+      mean_h2 = mean(h2, na.rm = TRUE),
+      median_h2 = median(h2, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(cols = c(mean_h2, median_h2), names_to = "stat_type", values_to = "h2_value") %>%
+    mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
+
+  p_overlap <- ggplot(
+    overlap_decile,
+    aes(x = factor(post_mean_bin), y = h2_value, color = source, linetype = stat_type, group = interaction(source, stat_type))
+  ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
     labs(
-      title = "s_het vs h2 (overlap TPM+TMM RAW)",
-      subtitle = "Same overlapping genes, both sources shown",
-      x = "s_het post_mean",
+      title = "s_het decile vs h2 (overlap TPM+TMM RAW)",
+      subtitle = "Deciles recalculated on overlapping genes only",
+      x = "s_het post_mean decile (1-10)",
       y = "h2_GREML",
-      color = "h2 source"
+      color = "h2 source",
+      linetype = "Summary"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
