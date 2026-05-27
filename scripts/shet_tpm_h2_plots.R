@@ -80,10 +80,6 @@ if (!cor_method %in% c("pearson", "spearman", "kendall")) {
   stop("COR_METHOD must be one of: pearson, spearman, kendall")
 }
 
-h2_low_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
-if (!is.finite(h2_low_cutoff) || h2_low_cutoff < 0) {
-  stop("H2_LO_CUTOFF must be a non-negative numeric value.")
-}
 h2_frac_cutoff <- as.numeric(Sys.getenv("H2_FRAC_CUTOFF", "0.0005"))
 if (!is.finite(h2_frac_cutoff) || h2_frac_cutoff < 0) {
   stop("H2_FRAC_CUTOFF must be a non-negative numeric value.")
@@ -981,6 +977,74 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
   fwrite(as.data.table(tbl), file.path(tables_dir, paste0("h2_source_comparison_", tolower(norm_label), "_gene_level.tsv")), sep = "\t")
 }
 
+run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "shet_h2_triplet_raw") {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+  dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+  tmm_plot_tbl <- tmm_tbl %>%
+    select(Gene, post_mean, h2_tmm_raw) %>%
+    filter(is.finite(post_mean), is.finite(h2_tmm_raw))
+
+  tpm_plot_tbl <- tpm_tbl %>%
+    select(Gene, post_mean, h2_tpm_raw) %>%
+    filter(is.finite(post_mean), is.finite(h2_tpm_raw))
+
+  overlap_long <- overlap_tbl %>%
+    select(Gene, post_mean, h2_tmm_raw, h2_tpm_raw) %>%
+    filter(is.finite(post_mean), is.finite(h2_tmm_raw), is.finite(h2_tpm_raw)) %>%
+    pivot_longer(
+      cols = c(h2_tmm_raw, h2_tpm_raw),
+      names_to = "source",
+      values_to = "h2"
+    ) %>%
+    mutate(source = recode(source, h2_tmm_raw = "TMM", h2_tpm_raw = "TPM"))
+
+  p_tmm <- ggplot(tmm_plot_tbl, aes(x = post_mean, y = h2_tmm_raw)) +
+    geom_point(alpha = 0.35, size = 0.7, color = "#1D3557") +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
+    labs(
+      title = "s_het vs h2 (TMM RAW)",
+      x = "s_het post_mean",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plot1_shet_vs_h2_tmm_raw.png"), p_tmm, width = 8, height = 5, dpi = 300)
+
+  p_tpm <- ggplot(tpm_plot_tbl, aes(x = post_mean, y = h2_tpm_raw)) +
+    geom_point(alpha = 0.35, size = 0.7, color = "#2A6F9E") +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#B22222") +
+    labs(
+      title = "s_het vs h2 (TPM RAW)",
+      x = "s_het post_mean",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plot2_shet_vs_h2_tpm_raw.png"), p_tpm, width = 8, height = 5, dpi = 300)
+
+  p_overlap <- ggplot(overlap_long, aes(x = post_mean, y = h2, color = source)) +
+    geom_point(alpha = 0.30, size = 0.65) +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
+    labs(
+      title = "s_het vs h2 (overlap TPM+TMM RAW)",
+      subtitle = "Same overlapping genes, both sources shown",
+      x = "s_het post_mean",
+      y = "h2_GREML",
+      color = "h2 source"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plot3_shet_vs_h2_overlap_tpm_tmm_raw.png"), p_overlap, width = 8, height = 5, dpi = 300)
+
+  fwrite(as.data.table(tmm_plot_tbl), file.path(tables_dir, "shet_vs_h2_tmm_raw_gene_level.tsv"), sep = "\t")
+  fwrite(as.data.table(tpm_plot_tbl), file.path(tables_dir, "shet_vs_h2_tpm_raw_gene_level.tsv"), sep = "\t")
+  fwrite(as.data.table(overlap_long), file.path(tables_dir, "shet_vs_h2_overlap_tpm_tmm_raw_gene_level.tsv"), sep = "\t")
+}
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
@@ -1047,9 +1111,6 @@ shet_tbl <- shet_tbl %>%
   group_by(Gene) %>%
   summarise(post_mean = mean(post_mean, na.rm = TRUE), .groups = "drop")
 
-h2_filter_note <- paste0("Low-h2 filter reference cutoff from prior scripts (applied on TMM h2): h2 > ", format(h2_low_cutoff, scientific = FALSE))
-message(h2_filter_note)
-
 tpm_metrics_tbl <- read_tpm_metrics_by_gene(tpm_run_dir)
 h2_tmm_raw_tbl <- read_h2_by_gene(raw_run_dir, h2_col_name = "h2_tmm_raw")
 h2_tmm_irnt_tbl <- read_h2_by_gene(irnt_run_dir, h2_col_name = "h2_tmm_irnt")
@@ -1076,6 +1137,11 @@ merged_source_irnt_tbl <- merged_irnt_tbl %>%
   inner_join(h2_tpm_irnt_tbl, by = "Gene") %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
+merged_tpm_raw_tbl <- shet_tbl %>%
+  inner_join(tpm_metrics_tbl, by = "Gene") %>%
+  inner_join(h2_tpm_raw_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
 merged_pair_tbl <- merged_raw_tbl %>%
   inner_join(
     merged_irnt_tbl %>% select(Gene, h2_tmm_irnt),
@@ -1093,6 +1159,7 @@ gene_count_audit <- tibble(
     "h2_tpm_irnt_tbl",
     "merged_raw_tbl",
     "merged_irnt_tbl",
+    "merged_tpm_raw_tbl",
     "merged_source_raw_tbl",
     "merged_source_irnt_tbl",
     "merged_pair_tbl"
@@ -1106,6 +1173,7 @@ gene_count_audit <- tibble(
     nrow(h2_tpm_irnt_tbl),
     nrow(merged_raw_tbl),
     nrow(merged_irnt_tbl),
+    nrow(merged_tpm_raw_tbl),
     nrow(merged_source_raw_tbl),
     nrow(merged_source_irnt_tbl),
     nrow(merged_pair_tbl)
@@ -1119,6 +1187,21 @@ if (nrow(merged_raw_tbl) == 0L) {
 
 if (nrow(merged_irnt_tbl) == 0L) {
   stop("No overlapping genes after merging Shet + TPM + TMM IRNT h2.")
+}
+
+if (nrow(merged_tpm_raw_tbl) == 0L) {
+  stop("No overlapping genes after merging Shet + TPM + TPM RAW h2.")
+}
+
+if (nrow(merged_source_raw_tbl) > 0L) {
+  run_shet_h2_triplet(
+    tmm_tbl = merged_raw_tbl,
+    tpm_tbl = merged_tpm_raw_tbl,
+    overlap_tbl = merged_source_raw_tbl,
+    suite_name = "shet_vs_h2_triplet_raw"
+  )
+} else {
+  message("Skipping Shet-vs-h2 triplet: no overlap between TMM and TPM RAW h2 tables.")
 }
 
 run_plot_suite_single(
@@ -1200,94 +1283,3 @@ if (nrow(merged_pair_tbl) > 0L) {
 } else {
   message("Skipping overlap RAW-vs-IRNT suite: no genes shared between RAW and IRNT merges.")
 }
-
-filtered_raw_tbl <- merged_raw_tbl %>%
-  filter(h2_tmm_raw > h2_low_cutoff)
-
-filtered_irnt_tbl <- merged_irnt_tbl %>%
-  filter(h2_tmm_irnt > h2_low_cutoff)
-
-filtered_pair_tbl <- merged_pair_tbl %>%
-  filter(h2_tmm_raw > h2_low_cutoff, h2_tmm_irnt > h2_low_cutoff)
-
-filtered_source_raw_tbl <- merged_source_raw_tbl %>%
-  filter(h2_tmm_raw > h2_low_cutoff, h2_tpm_raw > h2_low_cutoff)
-
-filtered_source_irnt_tbl <- merged_source_irnt_tbl %>%
-  filter(h2_tmm_irnt > h2_low_cutoff, h2_tpm_irnt > h2_low_cutoff)
-
-if (nrow(filtered_raw_tbl) >= 10L) {
-  run_plot_suite_single(
-    df = filtered_raw_tbl,
-    h2_col = "h2_tmm_raw",
-    h2_label = "RAW",
-    suite_name = paste0("raw_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
-    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff)
-  )
-  run_decile_sensitivity_single(
-    df = filtered_raw_tbl,
-    h2_col = "h2_tmm_raw",
-    h2_label = "RAW",
-    suite_name = paste0("raw_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
-    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff),
-    shet_reference_tbl = shet_tbl,
-    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
-  )
-} else message("Skipping RAW-only low-h2-filtered suite: too few genes (n=", nrow(filtered_raw_tbl), ").")
-
-if (nrow(filtered_irnt_tbl) >= 10L) {
-  run_plot_suite_single(
-    df = filtered_irnt_tbl,
-    h2_col = "h2_tmm_irnt",
-    h2_label = "IRNT",
-    suite_name = paste0("irnt_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
-    suite_subtitle = paste0("Genes with h2 TMM IRNT > ", h2_low_cutoff)
-  )
-  run_decile_sensitivity_single(
-    df = filtered_irnt_tbl,
-    h2_col = "h2_tmm_irnt",
-    h2_label = "IRNT",
-    suite_name = paste0("irnt_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
-    suite_subtitle = paste0("Genes with h2 TMM IRNT > ", h2_low_cutoff),
-    shet_reference_tbl = shet_tbl,
-    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
-  )
-} else message("Skipping IRNT-only low-h2-filtered suite: too few genes (n=", nrow(filtered_irnt_tbl), ").")
-
-if (nrow(filtered_pair_tbl) >= 10L) {
-  overlap_filtered_suite <- paste0("raw_irnt_overlap_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE)))
-  run_plot_suite_pair(
-    df = filtered_pair_tbl,
-    suite_name = overlap_filtered_suite,
-    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff, " and h2 TMM IRNT > ", h2_low_cutoff)
-  )
-  run_decile_sensitivity_pair(
-    df = filtered_pair_tbl,
-    suite_name = overlap_filtered_suite,
-    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff, " and h2 TMM IRNT > ", h2_low_cutoff),
-    shet_reference_tbl = shet_tbl,
-    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
-  )
-} else message("Skipping RAW-IRNT overlap low-h2-filtered suite: too few genes (n=", nrow(filtered_pair_tbl), ").")
-
-if (nrow(filtered_source_raw_tbl) >= 10L) {
-  run_h2_source_comparison(
-    df = filtered_source_raw_tbl,
-    h2_tmm_col = "h2_tmm_raw",
-    h2_tpm_col = "h2_tpm_raw",
-    norm_label = "RAW",
-    suite_name = paste0("h2_source_compare_raw_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
-    suite_subtitle = paste0("Genes with RAW h2 > ", h2_low_cutoff, " in both TMM and TPM")
-  )
-} else message("Skipping RAW h2 source comparison (filtered): too few genes (n=", nrow(filtered_source_raw_tbl), ").")
-
-if (nrow(filtered_source_irnt_tbl) >= 10L) {
-  run_h2_source_comparison(
-    df = filtered_source_irnt_tbl,
-    h2_tmm_col = "h2_tmm_irnt",
-    h2_tpm_col = "h2_tpm_irnt",
-    norm_label = "IRNT",
-    suite_name = paste0("h2_source_compare_irnt_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
-    suite_subtitle = paste0("Genes with IRNT h2 > ", h2_low_cutoff, " in both TMM and TPM")
-  )
-} else message("Skipping IRNT h2 source comparison (filtered): too few genes (n=", nrow(filtered_source_irnt_tbl), ").")
