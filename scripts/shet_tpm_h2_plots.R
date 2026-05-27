@@ -82,6 +82,7 @@ if (!is.finite(h2_frac_cutoff) || h2_frac_cutoff < 0) {
   stop("H2_FRAC_CUTOFF must be a non-negative numeric value.")
 }
 run_branch_specific_plots <- tolower(Sys.getenv("RUN_BRANCH_SPECIFIC_PLOTS", "false")) %in% c("1", "true", "yes", "y")
+apply_epsilon_filter <- tolower(Sys.getenv("APPLY_EPSILON_FILTER", "true")) %in% c("1", "true", "yes", "y")
 
 analysis_root <- file.path(runs_dir, "_analysis", "shet_tmm_h2_plots_v1")
 dir.create(analysis_root, recursive = TRUE, showWarnings = FALSE)
@@ -197,6 +198,10 @@ read_h2_by_gene_bundle <- function(run_dir, h2_col_name) {
     filter(h2 > epsilon) %>%
     group_by(Gene) %>%
     summarise(!!h2_col_name := mean(h2, na.rm = TRUE), .groups = "drop")
+
+  if (apply_epsilon_filter) {
+    all_tbl <- ex_tbl
+  }
 
   list(
     all_tbl = all_tbl,
@@ -1241,6 +1246,215 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
   }
 }
 
+run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_name) {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+  dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+  all_base <- df_all_pair %>%
+    mutate(
+      shet_decile = ntile(post_mean, n_deciles),
+      tpm_decile = ntile(mean_tpm, n_deciles),
+      h2_tmm_raw_near_zero = if_else(is.na(h2_tmm_raw_near_zero), FALSE, as.logical(h2_tmm_raw_near_zero)),
+      h2_tmm_irnt_near_zero = if_else(is.na(h2_tmm_irnt_near_zero), FALSE, as.logical(h2_tmm_irnt_near_zero))
+    ) %>%
+    filter(
+      is.finite(post_mean), is.finite(mean_tpm), is.finite(median_tpm),
+      is.finite(h2_tmm_raw), is.finite(h2_tmm_irnt)
+    )
+
+  if (nrow(all_base) == 0L) return(invisible(NULL))
+
+  tpm_long <- all_base %>%
+    select(Gene, shet_decile, mean_tpm, median_tpm) %>%
+    pivot_longer(cols = c(mean_tpm, median_tpm), names_to = "tpm_metric", values_to = "tpm_value") %>%
+    mutate(tpm_metric = recode(tpm_metric, mean_tpm = "Mean TPM", median_tpm = "Median TPM"))
+
+  tpm_box_stats <- tpm_long %>%
+    group_by(shet_decile, tpm_metric) %>%
+    summarise(mean_value = mean(tpm_value, na.rm = TRUE), median_value = median(tpm_value, na.rm = TRUE), .groups = "drop")
+
+  p_tpm_dist <- ggplot(tpm_long, aes(x = factor(shet_decile), y = tpm_value)) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#DDEAF6", color = "#1D3557") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    facet_wrap(~tpm_metric, scales = "free_y") +
+    labs(
+      title = "TPM distribution vs s_het decile",
+      subtitle = "Boxplot with mean/median markers",
+      x = "s_het post_mean decile (1-10)",
+      y = "TPM"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotA_tpm_distribution_vs_shet_decile_box.png"), p_tpm_dist, width = 10, height = 5.5, dpi = 300)
+
+  skew_tbl <- all_base %>%
+    group_by(shet_decile) %>%
+    summarise(
+      n_genes = n(),
+      skew_mean_tpm = skewness_moment(mean_tpm),
+      skew_median_tpm = skewness_moment(median_tpm),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(cols = c(skew_mean_tpm, skew_median_tpm), names_to = "metric", values_to = "skewness") %>%
+    mutate(metric = recode(metric, skew_mean_tpm = "Mean TPM skewness", skew_median_tpm = "Median TPM skewness"))
+
+  p_skew <- ggplot(skew_tbl, aes(x = factor(shet_decile), y = skewness, color = metric, group = metric)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    labs(
+      title = "TPM skewness vs s_het decile",
+      x = "s_het post_mean decile (1-10)",
+      y = "Skewness",
+      color = "Metric"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotB_tpm_skewness_vs_shet_decile.png"), p_skew, width = 9, height = 5, dpi = 300)
+
+  h2_long_all <- all_base %>%
+    transmute(
+      Gene, shet_decile, tpm_decile, mean_tpm, median_tpm,
+      h2_raw = h2_tmm_raw, h2_irnt = h2_tmm_irnt,
+      near_zero_raw = h2_tmm_raw_near_zero,
+      near_zero_irnt = h2_tmm_irnt_near_zero
+    ) %>%
+    pivot_longer(cols = c(h2_raw, h2_irnt), names_to = "h2_type", values_to = "h2") %>%
+    mutate(
+      h2_type = recode(h2_type, h2_raw = "RAW", h2_irnt = "IRNT"),
+      is_near_zero = if_else(h2_type == "RAW", near_zero_raw, near_zero_irnt)
+    ) %>%
+    filter(is.finite(h2))
+
+  h2_long_ex <- h2_long_all %>% filter(!is_near_zero)
+
+  frac_near0_shet <- h2_long_all %>%
+    group_by(shet_decile, h2_type) %>%
+    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero, na.rm = TRUE), .groups = "drop")
+
+  p_frac_shet <- ggplot(frac_near0_shet, aes(x = factor(shet_decile), y = frac_near_zero_h2, color = h2_type, group = h2_type)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    labs(
+      title = "Fraction genes with near-zero h2 vs s_het decile",
+      subtitle = "Near-zero defined with epsilon = min(h2_GREML) per RAW/IRNT branch",
+      x = "s_het post_mean decile (1-10)",
+      y = "Fraction near-zero h2 genes",
+      color = "TMM h2 type"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.png"), p_frac_shet, width = 9, height = 5, dpi = 300)
+
+  frac_near0_tpm <- h2_long_all %>%
+    group_by(tpm_decile, h2_type) %>%
+    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero, na.rm = TRUE), .groups = "drop")
+
+  p_frac_tpm <- ggplot(frac_near0_tpm, aes(x = factor(tpm_decile), y = frac_near_zero_h2, color = h2_type, group = h2_type)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    labs(
+      title = "Fraction genes with near-zero h2 vs TPM decile",
+      subtitle = "Near-zero defined with epsilon = min(h2_GREML) per RAW/IRNT branch",
+      x = "TPM decile (1-10)",
+      y = "Fraction near-zero h2 genes",
+      color = "TMM h2 type"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotD_fraction_near_zero_h2_vs_tpm_decile.png"), p_frac_tpm, width = 9, height = 5, dpi = 300)
+
+  h2_shet_all_stats <- h2_long_all %>%
+    group_by(shet_decile, h2_type) %>%
+    summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
+
+  p_h2_shet_all <- ggplot(h2_long_all, aes(x = factor(shet_decile), y = h2)) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#E8F3E8", color = "#264653") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    facet_wrap(~h2_type, scales = "free_y") +
+    labs(
+      title = "h2 distribution vs s_het decile (all expressed genes)",
+      subtitle = "TMM h2 shown for RAW and IRNT",
+      x = "s_het post_mean decile (1-10)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotE_h2_distribution_vs_shet_decile_all_expressed.png"), p_h2_shet_all, width = 10, height = 5.5, dpi = 300)
+
+  h2_shet_ex_stats <- h2_long_ex %>%
+    group_by(shet_decile, h2_type) %>%
+    summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
+
+  p_h2_shet_ex <- ggplot(h2_long_ex, aes(x = factor(shet_decile), y = h2)) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#FCE8E6", color = "#6D597A") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    facet_wrap(~h2_type, scales = "free_y") +
+    labs(
+      title = "h2 distribution vs s_het decile (excluding near-zero genes)",
+      subtitle = "TMM h2 shown for RAW and IRNT",
+      x = "s_het post_mean decile (1-10)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotF_h2_distribution_vs_shet_decile_excluding_near_zero.png"), p_h2_shet_ex, width = 10, height = 5.5, dpi = 300)
+
+  h2_tpm_all_stats <- h2_long_all %>%
+    group_by(tpm_decile, h2_type) %>%
+    summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
+
+  p_h2_tpm_all <- ggplot(h2_long_all, aes(x = factor(tpm_decile), y = h2)) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#FFF3CD", color = "#264653") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    facet_wrap(~h2_type, scales = "free_y") +
+    labs(
+      title = "h2 distribution vs TPM decile (all expressed genes)",
+      subtitle = "TMM h2 shown for RAW and IRNT",
+      x = "TPM decile (1-10)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotG_h2_distribution_vs_tpm_decile_all_expressed.png"), p_h2_tpm_all, width = 10, height = 5.5, dpi = 300)
+
+  h2_tpm_ex_stats <- h2_long_ex %>%
+    group_by(tpm_decile, h2_type) %>%
+    summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
+
+  p_h2_tpm_ex <- ggplot(h2_long_ex, aes(x = factor(tpm_decile), y = h2)) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#E9ECEF", color = "#4A4E69") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    facet_wrap(~h2_type, scales = "free_y") +
+    labs(
+      title = "h2 distribution vs TPM decile (excluding near-zero genes)",
+      subtitle = "TMM h2 shown for RAW and IRNT",
+      x = "TPM decile (1-10)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotH_h2_distribution_vs_tpm_decile_excluding_near_zero.png"), p_h2_tpm_ex, width = 10, height = 5.5, dpi = 300)
+
+  fwrite(as.data.table(all_base), file.path(tables_dir, "additional_analysis_all_genes_pair_base.tsv"), sep = "\t")
+  fwrite(as.data.table(df_ex_pair), file.path(tables_dir, "additional_analysis_excluding_epsilon_pair_base.tsv"), sep = "\t")
+  fwrite(as.data.table(tpm_box_stats), file.path(tables_dir, "plotA_tpm_distribution_summary_values.tsv"), sep = "\t")
+  fwrite(as.data.table(skew_tbl), file.path(tables_dir, "plotB_tpm_skewness_vs_shet_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(frac_near0_shet), file.path(tables_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(frac_near0_tpm), file.path(tables_dir, "plotD_fraction_near_zero_h2_vs_tpm_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(h2_shet_all_stats), file.path(tables_dir, "plotE_h2_vs_shet_decile_all_summary_values.tsv"), sep = "\t")
+  fwrite(as.data.table(h2_shet_ex_stats), file.path(tables_dir, "plotF_h2_vs_shet_decile_excluding_near_zero_summary_values.tsv"), sep = "\t")
+  fwrite(as.data.table(h2_tpm_all_stats), file.path(tables_dir, "plotG_h2_vs_tpm_decile_all_summary_values.tsv"), sep = "\t")
+  fwrite(as.data.table(h2_tpm_ex_stats), file.path(tables_dir, "plotH_h2_vs_tpm_decile_excluding_near_zero_summary_values.tsv"), sep = "\t")
+}
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
@@ -1259,6 +1473,7 @@ message("Using TPM run:  ", tpm_run_dir)
 h2_method_info <- tibble(
   setting = c(
     "force_tmm_h2",
+    "apply_epsilon_filter",
     "run_branch_specific_plots",
     "h2_frac_cutoff",
     "input_method_raw",
@@ -1274,6 +1489,7 @@ h2_method_info <- tibble(
   ),
   value = c(
     as.character(force_tmm_h2),
+    as.character(apply_epsilon_filter),
     as.character(run_branch_specific_plots),
     as.character(h2_frac_cutoff),
     method_raw,
@@ -1407,9 +1623,16 @@ merged_tpm_irnt_tbl <- shet_tbl %>%
   inner_join(h2_tpm_irnt_tbl, by = "Gene") %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
+merged_pair_all_tbl <- merged_raw_all_tbl %>%
+  inner_join(
+    merged_irnt_all_tbl %>% select(Gene, h2_tmm_irnt, h2_tmm_irnt_near_zero),
+    by = "Gene"
+  ) %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
 merged_pair_tbl <- merged_raw_tbl %>%
   inner_join(
-    merged_irnt_tbl %>% select(Gene, h2_tmm_irnt),
+    merged_irnt_tbl %>% select(Gene, h2_tmm_irnt, h2_tmm_irnt_near_zero),
     by = "Gene"
   ) %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
@@ -1434,6 +1657,7 @@ gene_count_audit <- tibble(
     "merged_tpm_irnt_tbl",
     "merged_source_raw_tbl",
     "merged_source_irnt_tbl",
+    "merged_pair_all_tbl",
     "merged_pair_tbl"
   ),
   n_genes = c(
@@ -1455,6 +1679,7 @@ gene_count_audit <- tibble(
     nrow(merged_tpm_irnt_tbl),
     nrow(merged_source_raw_tbl),
     nrow(merged_source_irnt_tbl),
+    nrow(merged_pair_all_tbl),
     nrow(merged_pair_tbl)
   )
 )
@@ -1541,24 +1766,6 @@ if (run_branch_specific_plots) {
     shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
   )
 
-  run_additional_decile_analyses(
-    df_all = merged_raw_all_tbl,
-    df_ex = merged_raw_tbl,
-    h2_col = "h2_tmm_raw",
-    near_zero_col = "h2_tmm_raw_near_zero",
-    h2_label = "RAW",
-    suite_name = "additional_decile_diagnostics_raw"
-  )
-
-  run_additional_decile_analyses(
-    df_all = merged_irnt_all_tbl,
-    df_ex = merged_irnt_tbl,
-    h2_col = "h2_tmm_irnt",
-    near_zero_col = "h2_tmm_irnt_near_zero",
-    h2_label = "IRNT",
-    suite_name = "additional_decile_diagnostics_irnt"
-  )
-
   if (nrow(merged_source_raw_tbl) > 0L) {
     run_h2_source_comparison(
       df = merged_source_raw_tbl,
@@ -1586,6 +1793,16 @@ if (run_branch_specific_plots) {
   }
 } else {
   message("Skipping branch-specific RAW-only/IRNT-only suites (RUN_BRANCH_SPECIFIC_PLOTS=false).")
+}
+
+if (nrow(merged_pair_all_tbl) > 0L && nrow(merged_pair_tbl) > 0L) {
+  run_additional_decile_analyses_pair(
+    df_all_pair = merged_pair_all_tbl,
+    df_ex_pair = merged_pair_tbl,
+    suite_name = "additional_decile_diagnostics_raw_irnt"
+  )
+} else {
+  message("Skipping additional decile diagnostics RAW+IRNT: insufficient overlap.")
 }
 
 if (nrow(merged_pair_tbl) > 0L) {
