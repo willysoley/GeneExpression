@@ -21,6 +21,8 @@ shet_sheet <- Sys.getenv("SHET_SHEET", "Supplementary Table 1")
 method_raw <- Sys.getenv("METHOD_RAW", "all_snps_tmm_raw")
 method_irnt <- Sys.getenv("METHOD_IRNT", "all_snps_tmm_irnt")
 force_tmm_h2 <- tolower(Sys.getenv("FORCE_TMM_H2", "true")) %in% c("1", "true", "yes", "y")
+method_h2_tpm_raw <- Sys.getenv("METHOD_H2_TPM_RAW", "")
+method_h2_tpm_irnt <- Sys.getenv("METHOD_H2_TPM_IRNT", "")
 
 method_raw_parts <- str_match(method_raw, "^(all_snps|hm3_no_mhc)_(tmm|tpm)_(raw|irnt|inverse_normal)$")
 method_irnt_parts <- str_match(method_irnt, "^(all_snps|hm3_no_mhc)_(tmm|tpm)_(raw|irnt|inverse_normal)$")
@@ -34,6 +36,22 @@ if (force_tmm_h2) {
   }
   if (!is.na(method_irnt_parts[1, 1])) {
     method_h2_irnt <- paste(method_irnt_parts[1, 2], "tmm", "irnt", sep = "_")
+  }
+}
+
+if (!nzchar(method_h2_tpm_raw)) {
+  if (!is.na(method_raw_parts[1, 1])) {
+    method_h2_tpm_raw <- paste(method_raw_parts[1, 2], "tpm", "raw", sep = "_")
+  } else {
+    method_h2_tpm_raw <- "all_snps_tpm_raw"
+  }
+}
+
+if (!nzchar(method_h2_tpm_irnt)) {
+  if (!is.na(method_irnt_parts[1, 1])) {
+    method_h2_tpm_irnt <- paste(method_irnt_parts[1, 2], "tpm", "irnt", sep = "_")
+  } else {
+    method_h2_tpm_irnt <- "all_snps_tpm_irnt"
   }
 }
 
@@ -65,6 +83,10 @@ if (!cor_method %in% c("pearson", "spearman", "kendall")) {
 h2_low_cutoff <- as.numeric(Sys.getenv("H2_LO_CUTOFF", "0.005"))
 if (!is.finite(h2_low_cutoff) || h2_low_cutoff < 0) {
   stop("H2_LO_CUTOFF must be a non-negative numeric value.")
+}
+h2_frac_cutoff <- as.numeric(Sys.getenv("H2_FRAC_CUTOFF", "0.0005"))
+if (!is.finite(h2_frac_cutoff) || h2_frac_cutoff < 0) {
+  stop("H2_FRAC_CUTOFF must be a non-negative numeric value.")
 }
 
 analysis_root <- file.path(runs_dir, "_analysis", "shet_tpm_h2_plots")
@@ -518,8 +540,8 @@ run_decile_sensitivity_pair <- function(
       median_h2_raw = median(h2_tmm_raw, na.rm = TRUE),
       mean_h2_irnt = mean(h2_tmm_irnt, na.rm = TRUE),
       median_h2_irnt = median(h2_tmm_irnt, na.rm = TRUE),
-      prop_h2_raw_gt_0p05 = mean(h2_tmm_raw > 0.05, na.rm = TRUE),
-      prop_h2_irnt_gt_0p05 = mean(h2_tmm_irnt > 0.05, na.rm = TRUE),
+      prop_h2_raw_gt_frac_cutoff = mean(h2_tmm_raw > h2_frac_cutoff, na.rm = TRUE),
+      prop_h2_irnt_gt_frac_cutoff = mean(h2_tmm_irnt > h2_frac_cutoff, na.rm = TRUE),
       .groups = "drop"
     ) %>%
     arrange(decile_source, decile_direction, post_mean_bin)
@@ -542,17 +564,17 @@ run_decile_sensitivity_pair <- function(
   fwrite(as.data.table(sens_decile_summary), file.path(tables_dir, "decile_sensitivity_summary.tsv"), sep = "\t")
   fwrite(as.data.table(sens_stats), file.path(tables_dir, "decile_sensitivity_stats.tsv"), sep = "\t")
 
-  # Recreation-style plot: left axis mean h2 raw, right axis fraction h2 raw > 0.05
+  # Recreation-style plot: left axis mean h2 raw, right axis fraction h2 raw > cutoff
   dual_tbl <- sens_decile_summary %>%
     group_by(decile_source, decile_direction) %>%
     mutate(
       h2_min = min(mean_h2_raw, na.rm = TRUE),
       h2_max = max(mean_h2_raw, na.rm = TRUE),
-      frac_min = min(prop_h2_raw_gt_0p05, na.rm = TRUE),
-      frac_max = max(prop_h2_raw_gt_0p05, na.rm = TRUE),
+      frac_min = min(prop_h2_raw_gt_frac_cutoff, na.rm = TRUE),
+      frac_max = max(prop_h2_raw_gt_frac_cutoff, na.rm = TRUE),
       frac_scaled = if_else(
         is.finite(frac_max - frac_min) & (frac_max - frac_min) > 0,
-        h2_min + (prop_h2_raw_gt_0p05 - frac_min) * (h2_max - h2_min) / (frac_max - frac_min),
+        h2_min + (prop_h2_raw_gt_frac_cutoff - frac_min) * (h2_max - h2_min) / (frac_max - frac_min),
         h2_min
       )
     ) %>%
@@ -567,7 +589,7 @@ run_decile_sensitivity_pair <- function(
     facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = "Decile sensitivity recreation view",
-      subtitle = paste0(suite_subtitle, " | blue = mean h2 RAW, red = fraction h2 TMM RAW > 0.05"),
+      subtitle = paste0(suite_subtitle, " | blue = mean h2 RAW, red = fraction h2 TMM RAW > ", h2_frac_cutoff),
       x = "Decile of selective constraint",
       y = "Mean expression h2 (RAW); decile 10 = highest constraint"
     ) +
@@ -588,11 +610,11 @@ run_decile_sensitivity_pair <- function(
     mutate(
       tpm_min = min(mean_tpm, na.rm = TRUE),
       tpm_max = max(mean_tpm, na.rm = TRUE),
-      frac_min = min(prop_h2_raw_gt_0p05, na.rm = TRUE),
-      frac_max = max(prop_h2_raw_gt_0p05, na.rm = TRUE),
+      frac_min = min(prop_h2_raw_gt_frac_cutoff, na.rm = TRUE),
+      frac_max = max(prop_h2_raw_gt_frac_cutoff, na.rm = TRUE),
       frac_scaled_to_tpm = if_else(
         is.finite(frac_max - frac_min) & (frac_max - frac_min) > 0,
-        tpm_min + (prop_h2_raw_gt_0p05 - frac_min) * (tpm_max - tpm_min) / (frac_max - frac_min),
+        tpm_min + (prop_h2_raw_gt_frac_cutoff - frac_min) * (tpm_max - tpm_min) / (frac_max - frac_min),
         tpm_min
       )
     ) %>%
@@ -607,7 +629,7 @@ run_decile_sensitivity_pair <- function(
     facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = "Decile sensitivity recreation view (TPM)",
-      subtitle = paste0(suite_subtitle, " | blue = mean TPM, red = fraction h2 TMM RAW > 0.05"),
+      subtitle = paste0(suite_subtitle, " | blue = mean TPM, red = fraction h2 TMM RAW > ", h2_frac_cutoff),
       x = "Decile of selective constraint",
       y = "Mean TPM; decile 10 = highest constraint"
     ) +
@@ -821,7 +843,7 @@ run_decile_sensitivity_single <- function(df, h2_col, h2_label, suite_name, suit
       mean_tpm = mean(mean_tpm, na.rm = TRUE),
       mean_h2 = mean(.data[[h2_col]], na.rm = TRUE),
       median_h2 = median(.data[[h2_col]], na.rm = TRUE),
-      prop_h2_gt_0p05 = mean(.data[[h2_col]] > 0.05, na.rm = TRUE),
+      prop_h2_gt_frac_cutoff = mean(.data[[h2_col]] > h2_frac_cutoff, na.rm = TRUE),
       .groups = "drop"
     ) %>%
     arrange(decile_source, decile_direction, post_mean_bin)
@@ -833,11 +855,11 @@ run_decile_sensitivity_single <- function(df, h2_col, h2_label, suite_name, suit
     mutate(
       h2_min = min(mean_h2, na.rm = TRUE),
       h2_max = max(mean_h2, na.rm = TRUE),
-      frac_min = min(prop_h2_gt_0p05, na.rm = TRUE),
-      frac_max = max(prop_h2_gt_0p05, na.rm = TRUE),
+      frac_min = min(prop_h2_gt_frac_cutoff, na.rm = TRUE),
+      frac_max = max(prop_h2_gt_frac_cutoff, na.rm = TRUE),
       frac_scaled = if_else(
         is.finite(frac_max - frac_min) & (frac_max - frac_min) > 0,
-        h2_min + (prop_h2_gt_0p05 - frac_min) * (h2_max - h2_min) / (frac_max - frac_min),
+        h2_min + (prop_h2_gt_frac_cutoff - frac_min) * (h2_max - h2_min) / (frac_max - frac_min),
         h2_min
       )
     ) %>%
@@ -852,7 +874,7 @@ run_decile_sensitivity_single <- function(df, h2_col, h2_label, suite_name, suit
     facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = paste0("Decile sensitivity recreation view (", h2_label, ")"),
-      subtitle = paste0(suite_subtitle, " | blue = mean h2, red = fraction h2 > 0.05"),
+      subtitle = paste0(suite_subtitle, " | blue = mean h2, red = fraction h2 > ", h2_frac_cutoff),
       x = "Decile of selective constraint",
       y = "Mean expression h2; decile 10 = highest constraint"
     ) +
@@ -862,35 +884,146 @@ run_decile_sensitivity_single <- function(df, h2_col, h2_label, suite_name, suit
   ggsave(file.path(plots_dir, "decile_sensitivity_recreation_single_norm.png"), p_dual, width = 14, height = 6.5, dpi = 300)
 }
 
+run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, suite_name, suite_subtitle) {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+  dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+  tbl <- df %>%
+    mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
+    filter(is.finite(.data[[h2_tmm_col]]), is.finite(.data[[h2_tpm_col]]))
+
+  if (nrow(tbl) == 0L) {
+    message("Skipping h2 source comparison for ", norm_label, ": no overlap between TPM and TMM h2.")
+    return(invisible(NULL))
+  }
+
+  long_actual <- tbl %>%
+    select(Gene, post_mean, post_mean_bin, all_of(c(h2_tmm_col, h2_tpm_col))) %>%
+    pivot_longer(
+      cols = all_of(c(h2_tmm_col, h2_tpm_col)),
+      names_to = "h2_source",
+      values_to = "h2"
+    ) %>%
+    mutate(
+      h2_source = recode(h2_source, !!h2_tmm_col := "TMM", !!h2_tpm_col := "TPM")
+    )
+
+  p_actual <- ggplot(long_actual, aes(x = post_mean, y = h2, color = h2_source)) +
+    geom_point(alpha = 0.35, size = 0.7) +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1) +
+    labs(
+      title = paste0("h2 source comparison (", norm_label, "): TPM vs TMM"),
+      subtitle = suite_subtitle,
+      x = "s_het post_mean",
+      y = "h2_GREML",
+      color = "Expression source"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, paste0("plot_h2_source_actual_", tolower(norm_label), ".png")), p_actual, width = 8, height = 5, dpi = 300)
+
+  decile_tbl <- long_actual %>%
+    group_by(post_mean_bin, h2_source) %>%
+    summarise(
+      mean_h2 = mean(h2, na.rm = TRUE),
+      median_h2 = median(h2, na.rm = TRUE),
+      n_genes = n(),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(
+      cols = c(mean_h2, median_h2),
+      names_to = "stat_type",
+      values_to = "h2_value"
+    ) %>%
+    mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
+
+  p_decile <- ggplot(
+    decile_tbl,
+    aes(
+      x = factor(post_mean_bin),
+      y = h2_value,
+      color = h2_source,
+      linetype = stat_type,
+      group = interaction(h2_source, stat_type)
+    )
+  ) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    labs(
+      title = paste0("h2 source comparison by s_het decile (", norm_label, ")"),
+      subtitle = suite_subtitle,
+      x = "s_het post_mean decile (1-10)",
+      y = "h2_GREML",
+      color = "Expression source",
+      linetype = "Summary"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, paste0("plot_h2_source_decile_", tolower(norm_label), ".png")), p_decile, width = 8, height = 5, dpi = 300)
+
+  p_scatter <- ggplot(tbl, aes(x = .data[[h2_tmm_col]], y = .data[[h2_tpm_col]])) +
+    geom_point(alpha = 0.35, size = 0.7, color = "#2A6F9E") +
+    geom_abline(slope = 1, intercept = 0, linetype = "dashed", color = "#B22222", linewidth = 0.8) +
+    geom_smooth(method = "lm", se = FALSE, color = "#264653", linewidth = 1) +
+    labs(
+      title = paste0("TPM vs TMM h2 scatter (", norm_label, ")"),
+      subtitle = suite_subtitle,
+      x = paste0("TMM h2 ", norm_label),
+      y = paste0("TPM h2 ", norm_label)
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, paste0("scatter_h2_tpm_vs_tmm_", tolower(norm_label), ".png")), p_scatter, width = 8, height = 5, dpi = 300)
+
+  fwrite(as.data.table(tbl), file.path(tables_dir, paste0("h2_source_comparison_", tolower(norm_label), "_gene_level.tsv")), sep = "\t")
+}
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
 raw_run_dir <- find_run_dir(method_h2_raw, require_summary = TRUE)
 irnt_run_dir <- find_run_dir(method_h2_irnt, require_summary = TRUE)
+tpm_h2_raw_run_dir <- find_run_dir(method_h2_tpm_raw, require_summary = TRUE)
+tpm_h2_irnt_run_dir <- find_run_dir(method_h2_tpm_irnt, require_summary = TRUE)
 tpm_run_dir <- find_run_dir(tpm_mean_method, require_summary = FALSE)
 
 message("Using TMM-RAW h2 run:  ", raw_run_dir, " (method=", method_h2_raw, ")")
 message("Using TMM-IRNT h2 run: ", irnt_run_dir, " (method=", method_h2_irnt, ")")
+message("Using TPM-RAW h2 run:  ", tpm_h2_raw_run_dir, " (method=", method_h2_tpm_raw, ")")
+message("Using TPM-IRNT h2 run: ", tpm_h2_irnt_run_dir, " (method=", method_h2_tpm_irnt, ")")
 message("Using TPM run:  ", tpm_run_dir)
 
 h2_method_info <- tibble(
   setting = c(
     "force_tmm_h2",
+    "h2_frac_cutoff",
     "input_method_raw",
     "input_method_irnt",
     "h2_method_raw_used",
     "h2_method_irnt_used",
+    "h2_method_tpm_raw_used",
+    "h2_method_tpm_irnt_used",
     "h2_raw_run_dir",
-    "h2_irnt_run_dir"
+    "h2_irnt_run_dir",
+    "h2_tpm_raw_run_dir",
+    "h2_tpm_irnt_run_dir"
   ),
   value = c(
     as.character(force_tmm_h2),
+    as.character(h2_frac_cutoff),
     method_raw,
     method_irnt,
     method_h2_raw,
     method_h2_irnt,
+    method_h2_tpm_raw,
+    method_h2_tpm_irnt,
     raw_run_dir,
-    irnt_run_dir
+    irnt_run_dir,
+    tpm_h2_raw_run_dir,
+    tpm_h2_irnt_run_dir
   )
 )
 fwrite(as.data.table(h2_method_info), file.path(analysis_root, "h2_method_info.tsv"), sep = "\t")
@@ -920,6 +1053,8 @@ message(h2_filter_note)
 tpm_metrics_tbl <- read_tpm_metrics_by_gene(tpm_run_dir)
 h2_tmm_raw_tbl <- read_h2_by_gene(raw_run_dir, h2_col_name = "h2_tmm_raw")
 h2_tmm_irnt_tbl <- read_h2_by_gene(irnt_run_dir, h2_col_name = "h2_tmm_irnt")
+h2_tpm_raw_tbl <- read_h2_by_gene(tpm_h2_raw_run_dir, h2_col_name = "h2_tpm_raw")
+h2_tpm_irnt_tbl <- read_h2_by_gene(tpm_h2_irnt_run_dir, h2_col_name = "h2_tpm_irnt")
 shet_tpm_overlap_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl %>% select(Gene), by = "Gene")
 
@@ -931,6 +1066,14 @@ merged_raw_tbl <- shet_tbl %>%
 merged_irnt_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl, by = "Gene") %>%
   inner_join(h2_tmm_irnt_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
+merged_source_raw_tbl <- merged_raw_tbl %>%
+  inner_join(h2_tpm_raw_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
+merged_source_irnt_tbl <- merged_irnt_tbl %>%
+  inner_join(h2_tpm_irnt_tbl, by = "Gene") %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
 merged_pair_tbl <- merged_raw_tbl %>%
@@ -946,8 +1089,12 @@ gene_count_audit <- tibble(
     "tpm_metrics_tbl",
     "h2_tmm_raw_tbl",
     "h2_tmm_irnt_tbl",
+    "h2_tpm_raw_tbl",
+    "h2_tpm_irnt_tbl",
     "merged_raw_tbl",
     "merged_irnt_tbl",
+    "merged_source_raw_tbl",
+    "merged_source_irnt_tbl",
     "merged_pair_tbl"
   ),
   n_genes = c(
@@ -955,8 +1102,12 @@ gene_count_audit <- tibble(
     nrow(tpm_metrics_tbl),
     nrow(h2_tmm_raw_tbl),
     nrow(h2_tmm_irnt_tbl),
+    nrow(h2_tpm_raw_tbl),
+    nrow(h2_tpm_irnt_tbl),
     nrow(merged_raw_tbl),
     nrow(merged_irnt_tbl),
+    nrow(merged_source_raw_tbl),
+    nrow(merged_source_irnt_tbl),
     nrow(merged_pair_tbl)
   )
 )
@@ -1006,6 +1157,32 @@ run_decile_sensitivity_single(
   shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
 )
 
+if (nrow(merged_source_raw_tbl) > 0L) {
+  run_h2_source_comparison(
+    df = merged_source_raw_tbl,
+    h2_tmm_col = "h2_tmm_raw",
+    h2_tpm_col = "h2_tpm_raw",
+    norm_label = "RAW",
+    suite_name = "h2_source_compare_raw_all_genes",
+    suite_subtitle = "Genes with Shet+TPM+both TMM/TPM RAW h2 overlap"
+  )
+} else {
+  message("Skipping RAW h2 source comparison: no overlap between TMM and TPM RAW h2.")
+}
+
+if (nrow(merged_source_irnt_tbl) > 0L) {
+  run_h2_source_comparison(
+    df = merged_source_irnt_tbl,
+    h2_tmm_col = "h2_tmm_irnt",
+    h2_tpm_col = "h2_tpm_irnt",
+    norm_label = "IRNT",
+    suite_name = "h2_source_compare_irnt_all_genes",
+    suite_subtitle = "Genes with Shet+TPM+both TMM/TPM IRNT h2 overlap"
+  )
+} else {
+  message("Skipping IRNT h2 source comparison: no overlap between TMM and TPM IRNT h2.")
+}
+
 if (nrow(merged_pair_tbl) > 0L) {
   run_plot_suite_pair(
     df = merged_pair_tbl,
@@ -1032,6 +1209,12 @@ filtered_irnt_tbl <- merged_irnt_tbl %>%
 
 filtered_pair_tbl <- merged_pair_tbl %>%
   filter(h2_tmm_raw > h2_low_cutoff, h2_tmm_irnt > h2_low_cutoff)
+
+filtered_source_raw_tbl <- merged_source_raw_tbl %>%
+  filter(h2_tmm_raw > h2_low_cutoff, h2_tpm_raw > h2_low_cutoff)
+
+filtered_source_irnt_tbl <- merged_source_irnt_tbl %>%
+  filter(h2_tmm_irnt > h2_low_cutoff, h2_tpm_irnt > h2_low_cutoff)
 
 if (nrow(filtered_raw_tbl) >= 10L) {
   run_plot_suite_single(
@@ -1086,3 +1269,25 @@ if (nrow(filtered_pair_tbl) >= 10L) {
     shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
   )
 } else message("Skipping RAW-IRNT overlap low-h2-filtered suite: too few genes (n=", nrow(filtered_pair_tbl), ").")
+
+if (nrow(filtered_source_raw_tbl) >= 10L) {
+  run_h2_source_comparison(
+    df = filtered_source_raw_tbl,
+    h2_tmm_col = "h2_tmm_raw",
+    h2_tpm_col = "h2_tpm_raw",
+    norm_label = "RAW",
+    suite_name = paste0("h2_source_compare_raw_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with RAW h2 > ", h2_low_cutoff, " in both TMM and TPM")
+  )
+} else message("Skipping RAW h2 source comparison (filtered): too few genes (n=", nrow(filtered_source_raw_tbl), ").")
+
+if (nrow(filtered_source_irnt_tbl) >= 10L) {
+  run_h2_source_comparison(
+    df = filtered_source_irnt_tbl,
+    h2_tmm_col = "h2_tmm_irnt",
+    h2_tpm_col = "h2_tpm_irnt",
+    norm_label = "IRNT",
+    suite_name = paste0("h2_source_compare_irnt_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with IRNT h2 > ", h2_low_cutoff, " in both TMM and TPM")
+  )
+} else message("Skipping IRNT h2 source comparison (filtered): too few genes (n=", nrow(filtered_source_irnt_tbl), ").")
