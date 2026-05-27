@@ -465,11 +465,8 @@ run_decile_sensitivity <- function(
 
   decile_maps <- bind_rows(
     make_decile_map(df, "merged_h2_genes", "ascending"),
-    make_decile_map(df, "merged_h2_genes", "descending"),
     make_decile_map(shet_reference_tbl, "global_shet_genes", "ascending"),
-    make_decile_map(shet_reference_tbl, "global_shet_genes", "descending"),
-    make_decile_map(shet_tpm_overlap_tbl, "shet_tpm_overlap_genes", "ascending"),
-    make_decile_map(shet_tpm_overlap_tbl, "shet_tpm_overlap_genes", "descending")
+    make_decile_map(shet_tpm_overlap_tbl, "shet_tpm_overlap_genes", "ascending")
   )
 
   sens_tbl <- decile_maps %>%
@@ -538,12 +535,12 @@ run_decile_sensitivity <- function(
     geom_line(aes(y = frac_scaled), color = "#B22222", linewidth = 1) +
     geom_point(aes(y = frac_scaled), color = "#B22222", size = 1.8, alpha = 0.8) +
     scale_x_continuous(breaks = 1:10) +
-    facet_grid(decile_direction ~ decile_source, scales = "free_y") +
+    facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = "Decile sensitivity recreation view",
       subtitle = paste0(suite_subtitle, " | blue = mean h2 RAW, red = fraction h2 TMM RAW > 0.05"),
       x = "Decile of selective constraint",
-      y = "Mean expression h2 (RAW)"
+      y = "Mean expression h2 (RAW); decile 10 = highest constraint"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
@@ -556,6 +553,46 @@ run_decile_sensitivity <- function(
     dpi = 300
   )
 
+  # TPM recreation-style plot: blue = mean TPM, red = fraction high-h2 (rescaled)
+  dual_tpm_tbl <- sens_decile_summary %>%
+    group_by(decile_source) %>%
+    mutate(
+      tpm_min = min(mean_tpm, na.rm = TRUE),
+      tpm_max = max(mean_tpm, na.rm = TRUE),
+      frac_min = min(prop_h2_raw_gt_0p05, na.rm = TRUE),
+      frac_max = max(prop_h2_raw_gt_0p05, na.rm = TRUE),
+      frac_scaled_to_tpm = if_else(
+        is.finite(frac_max - frac_min) & (frac_max - frac_min) > 0,
+        tpm_min + (prop_h2_raw_gt_0p05 - frac_min) * (tpm_max - tpm_min) / (frac_max - frac_min),
+        tpm_min
+      )
+    ) %>%
+    ungroup()
+
+  p_dual_tpm <- ggplot(dual_tpm_tbl, aes(x = post_mean_bin)) +
+    geom_line(aes(y = mean_tpm), color = "#2A6F9E", linewidth = 1) +
+    geom_point(aes(y = mean_tpm), color = "#2A6F9E", size = 1.8, alpha = 0.8) +
+    geom_line(aes(y = frac_scaled_to_tpm), color = "#B22222", linewidth = 1) +
+    geom_point(aes(y = frac_scaled_to_tpm), color = "#B22222", size = 1.8, alpha = 0.8) +
+    scale_x_continuous(breaks = 1:10) +
+    facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
+    labs(
+      title = "Decile sensitivity recreation view (TPM)",
+      subtitle = paste0(suite_subtitle, " | blue = mean TPM, red = fraction h2 TMM RAW > 0.05"),
+      x = "Decile of selective constraint",
+      y = "Mean TPM; decile 10 = highest constraint"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+
+  ggsave(
+    filename = file.path(plots_dir, "decile_sensitivity_recreation_dual_axis_style_tpm.png"),
+    plot = p_dual_tpm,
+    width = 14,
+    height = 6.5,
+    dpi = 300
+  )
+
   h2_lines <- sens_decile_summary %>%
     select(decile_source, decile_direction, post_mean_bin, mean_h2_raw, mean_h2_irnt) %>%
     pivot_longer(cols = c(mean_h2_raw, mean_h2_irnt), names_to = "metric", values_to = "value") %>%
@@ -564,7 +601,7 @@ run_decile_sensitivity <- function(
   p_h2_sens <- ggplot(h2_lines, aes(x = factor(post_mean_bin), y = value, color = metric, group = metric)) +
     geom_line(linewidth = 0.9) +
     geom_point(size = 1.7) +
-    facet_grid(decile_direction ~ decile_source, scales = "free_y") +
+    facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
     labs(
       title = "Mean h2 trend by decile definition",
       subtitle = suite_subtitle,
