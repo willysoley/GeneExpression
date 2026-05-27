@@ -811,38 +811,47 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
   fwrite(as.data.table(tbl), file.path(tables_dir, paste0("h2_source_comparison_", tolower(norm_label), "_gene_level.tsv")), sep = "\t")
 }
 
-run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "shet_h2_triplet_raw") {
+run_shet_h2_triplet <- function(
+  tmm_tbl,
+  tpm_tbl,
+  overlap_tbl,
+  h2_tmm_col,
+  h2_tpm_col,
+  norm_label,
+  suite_name
+) {
   suite_root <- file.path(analysis_root, suite_name)
   plots_dir <- file.path(suite_root, "plots")
   tables_dir <- file.path(suite_root, "tables")
   dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
   dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+  norm_key <- tolower(norm_label)
 
   tmm_plot_tbl <- tmm_tbl %>%
     mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
-    select(Gene, post_mean, post_mean_bin, h2_tmm_raw) %>%
-    filter(is.finite(post_mean), is.finite(h2_tmm_raw))
+    transmute(Gene, post_mean, post_mean_bin, h2_tmm = .data[[h2_tmm_col]]) %>%
+    filter(is.finite(post_mean), is.finite(h2_tmm))
 
   tpm_plot_tbl <- tpm_tbl %>%
     mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
-    select(Gene, post_mean, post_mean_bin, h2_tpm_raw) %>%
-    filter(is.finite(post_mean), is.finite(h2_tpm_raw))
+    transmute(Gene, post_mean, post_mean_bin, h2_tpm = .data[[h2_tpm_col]]) %>%
+    filter(is.finite(post_mean), is.finite(h2_tpm))
 
   overlap_long <- overlap_tbl %>%
     mutate(post_mean_bin = ntile(post_mean, n_deciles)) %>%
-    select(Gene, post_mean, post_mean_bin, h2_tmm_raw, h2_tpm_raw) %>%
-    filter(is.finite(post_mean), is.finite(h2_tmm_raw), is.finite(h2_tpm_raw)) %>%
+    transmute(Gene, post_mean, post_mean_bin, h2_tmm = .data[[h2_tmm_col]], h2_tpm = .data[[h2_tpm_col]]) %>%
+    filter(is.finite(post_mean), is.finite(h2_tmm), is.finite(h2_tpm)) %>%
     pivot_longer(
-      cols = c(h2_tmm_raw, h2_tpm_raw),
+      cols = c(h2_tmm, h2_tpm),
       names_to = "source",
       values_to = "h2"
     ) %>%
-    mutate(source = recode(source, h2_tmm_raw = "TMM", h2_tpm_raw = "TPM"))
+    mutate(source = recode(source, h2_tmm = "TMM", h2_tpm = "TPM"))
 
   tmm_decile <- tmm_plot_tbl %>%
     group_by(post_mean_bin) %>%
     summarise(
-      mean_h2 = mean(h2_tmm_raw, na.rm = TRUE),
+      mean_h2 = mean(h2_tmm, na.rm = TRUE),
       .groups = "drop"
     )
 
@@ -850,19 +859,19 @@ run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "she
     geom_line(linewidth = 1, color = "#1D3557") +
     geom_point(size = 1.8, color = "#1D3557") +
     labs(
-      title = "s_het decile vs h2 (TMM RAW)",
+      title = paste0("s_het decile vs h2 (TMM ", toupper(norm_label), ")"),
       subtitle = "Deciles recalculated after TMM merge",
       x = "s_het post_mean decile (1-10)",
       y = "h2_GREML"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "plot1_shet_vs_h2_tmm_raw.png"), p_tmm, width = 8, height = 5, dpi = 300)
+  ggsave(file.path(plots_dir, paste0("plot1_shet_vs_h2_tmm_", norm_key, ".png")), p_tmm, width = 8, height = 5, dpi = 300)
 
   tpm_decile <- tpm_plot_tbl %>%
     group_by(post_mean_bin) %>%
     summarise(
-      mean_h2 = mean(h2_tpm_raw, na.rm = TRUE),
+      mean_h2 = mean(h2_tpm, na.rm = TRUE),
       .groups = "drop"
     )
 
@@ -870,14 +879,14 @@ run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "she
     geom_line(linewidth = 1, color = "#2A6F9E") +
     geom_point(size = 1.8, color = "#2A6F9E") +
     labs(
-      title = "s_het decile vs h2 (TPM RAW)",
+      title = paste0("s_het decile vs h2 (TPM ", toupper(norm_label), ")"),
       subtitle = "Deciles recalculated after TPM merge",
       x = "s_het post_mean decile (1-10)",
       y = "h2_GREML"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "plot2_shet_vs_h2_tpm_raw.png"), p_tpm, width = 8, height = 5, dpi = 300)
+  ggsave(file.path(plots_dir, paste0("plot2_shet_vs_h2_tpm_", norm_key, ".png")), p_tpm, width = 8, height = 5, dpi = 300)
 
   overlap_decile <- overlap_long %>%
     group_by(post_mean_bin, source) %>%
@@ -893,7 +902,7 @@ run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "she
     geom_line(linewidth = 1) +
     geom_point(size = 1.8) +
     labs(
-      title = "s_het decile vs h2 (overlap TPM+TMM RAW)",
+      title = paste0("s_het decile vs h2 (overlap TPM+TMM ", toupper(norm_label), ")"),
       subtitle = "Deciles recalculated on overlapping genes only",
       x = "s_het post_mean decile (1-10)",
       y = "h2_GREML",
@@ -901,11 +910,11 @@ run_shet_h2_triplet <- function(tmm_tbl, tpm_tbl, overlap_tbl, suite_name = "she
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
-  ggsave(file.path(plots_dir, "plot3_shet_vs_h2_overlap_tpm_tmm_raw.png"), p_overlap, width = 8, height = 5, dpi = 300)
+  ggsave(file.path(plots_dir, paste0("plot3_shet_vs_h2_overlap_tpm_tmm_", norm_key, ".png")), p_overlap, width = 8, height = 5, dpi = 300)
 
-  fwrite(as.data.table(tmm_plot_tbl), file.path(tables_dir, "shet_vs_h2_tmm_raw_gene_level.tsv"), sep = "\t")
-  fwrite(as.data.table(tpm_plot_tbl), file.path(tables_dir, "shet_vs_h2_tpm_raw_gene_level.tsv"), sep = "\t")
-  fwrite(as.data.table(overlap_long), file.path(tables_dir, "shet_vs_h2_overlap_tpm_tmm_raw_gene_level.tsv"), sep = "\t")
+  fwrite(as.data.table(tmm_plot_tbl), file.path(tables_dir, paste0("shet_vs_h2_tmm_", norm_key, "_gene_level.tsv")), sep = "\t")
+  fwrite(as.data.table(tpm_plot_tbl), file.path(tables_dir, paste0("shet_vs_h2_tpm_", norm_key, "_gene_level.tsv")), sep = "\t")
+  fwrite(as.data.table(overlap_long), file.path(tables_dir, paste0("shet_vs_h2_overlap_tpm_tmm_", norm_key, "_gene_level.tsv")), sep = "\t")
 }
 
 # --------------------------------------------------
@@ -1005,6 +1014,11 @@ merged_tpm_raw_tbl <- shet_tbl %>%
   inner_join(h2_tpm_raw_tbl, by = "Gene") %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
+merged_tpm_irnt_tbl <- shet_tbl %>%
+  inner_join(tpm_metrics_tbl, by = "Gene") %>%
+  inner_join(h2_tpm_irnt_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
 merged_pair_tbl <- merged_raw_tbl %>%
   inner_join(
     merged_irnt_tbl %>% select(Gene, h2_tmm_irnt),
@@ -1023,6 +1037,7 @@ gene_count_audit <- tibble(
     "merged_raw_tbl",
     "merged_irnt_tbl",
     "merged_tpm_raw_tbl",
+    "merged_tpm_irnt_tbl",
     "merged_source_raw_tbl",
     "merged_source_irnt_tbl",
     "merged_pair_tbl"
@@ -1037,6 +1052,7 @@ gene_count_audit <- tibble(
     nrow(merged_raw_tbl),
     nrow(merged_irnt_tbl),
     nrow(merged_tpm_raw_tbl),
+    nrow(merged_tpm_irnt_tbl),
     nrow(merged_source_raw_tbl),
     nrow(merged_source_irnt_tbl),
     nrow(merged_pair_tbl)
@@ -1056,15 +1072,36 @@ if (nrow(merged_tpm_raw_tbl) == 0L) {
   stop("No overlapping genes after merging Shet + TPM + TPM RAW h2.")
 }
 
+if (nrow(merged_tpm_irnt_tbl) == 0L) {
+  stop("No overlapping genes after merging Shet + TPM + TPM IRNT h2.")
+}
+
 if (nrow(merged_source_raw_tbl) > 0L) {
   run_shet_h2_triplet(
     tmm_tbl = merged_raw_tbl,
     tpm_tbl = merged_tpm_raw_tbl,
     overlap_tbl = merged_source_raw_tbl,
+    h2_tmm_col = "h2_tmm_raw",
+    h2_tpm_col = "h2_tpm_raw",
+    norm_label = "RAW",
     suite_name = "shet_vs_h2_triplet_raw"
   )
 } else {
-  message("Skipping Shet-vs-h2 triplet: no overlap between TMM and TPM RAW h2 tables.")
+  message("Skipping Shet-vs-h2 RAW triplet: no overlap between TMM and TPM RAW h2 tables.")
+}
+
+if (nrow(merged_source_irnt_tbl) > 0L) {
+  run_shet_h2_triplet(
+    tmm_tbl = merged_irnt_tbl,
+    tpm_tbl = merged_tpm_irnt_tbl,
+    overlap_tbl = merged_source_irnt_tbl,
+    h2_tmm_col = "h2_tmm_irnt",
+    h2_tpm_col = "h2_tpm_irnt",
+    norm_label = "IRNT",
+    suite_name = "shet_vs_h2_triplet_irnt"
+  )
+} else {
+  message("Skipping Shet-vs-h2 IRNT triplet: no overlap between TMM and TPM IRNT h2 tables.")
 }
 
 run_plot_suite_single(
