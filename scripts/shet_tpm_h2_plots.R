@@ -782,17 +782,27 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
     group_by(post_mean_bin, h2_source) %>%
     summarise(
       mean_h2 = mean(h2, na.rm = TRUE),
+      median_h2 = median(h2, na.rm = TRUE),
       n_genes = n(),
       .groups = "drop"
+    ) %>%
+    pivot_longer(
+      cols = c(mean_h2, median_h2),
+      names_to = "stat_type",
+      values_to = "h2_value"
+    ) %>%
+    mutate(
+      stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2")
     )
 
   p_decile <- ggplot(
     decile_tbl,
     aes(
       x = factor(post_mean_bin),
-      y = mean_h2,
+      y = h2_value,
       color = h2_source,
-      group = h2_source
+      linetype = stat_type,
+      group = interaction(h2_source, stat_type)
     )
   ) +
     geom_line(linewidth = 1) +
@@ -802,7 +812,8 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
       subtitle = suite_subtitle,
       x = "s_het post_mean decile (1-10)",
       y = "h2_GREML",
-      color = "Expression source"
+      color = "Expression source",
+      linetype = "Summary"
     ) +
     theme_minimal(base_size = 11) +
     theme(panel.grid.minor = element_blank())
