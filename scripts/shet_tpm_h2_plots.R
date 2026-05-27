@@ -988,14 +988,38 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     pivot_longer(cols = c(mean_tpm, median_tpm), names_to = "tpm_metric", values_to = "tpm_value") %>%
     mutate(tpm_metric = recode(tpm_metric, mean_tpm = "Mean TPM", median_tpm = "Median TPM"))
 
+  tpm_box_stats <- tpm_long %>%
+    group_by(shet_decile, tpm_metric) %>%
+    summarise(
+      mean_value = mean(tpm_value, na.rm = TRUE),
+      median_value = median(tpm_value, na.rm = TRUE),
+      .groups = "drop"
+    )
+
   p_tpm_dist <- ggplot(tpm_long, aes(x = factor(shet_decile), y = tpm_value)) +
     geom_boxplot(outlier.alpha = 0.2, fill = "#DDEAF6", color = "#1D3557") +
     stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
     stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    geom_text(
+      data = tpm_box_stats,
+      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "#B22222",
+      size = 2.5,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = tpm_box_stats,
+      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "#2A9D8F",
+      size = 2.5,
+      vjust = 1.2
+    ) +
     facet_wrap(~tpm_metric, scales = "free_y") +
     labs(
       title = paste0("TPM distribution vs s_het decile (", h2_label, " branch)"),
-      subtitle = "Boxplot with mean (red) and median (green) markers",
+      subtitle = "Boxplot with mean/median markers and numeric labels",
       x = "s_het post_mean decile (1-10)",
       y = "TPM"
     ) +
@@ -1065,9 +1089,29 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     geom_boxplot(outlier.alpha = 0.2, fill = "#E8F3E8", color = "#264653") +
     stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
     stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    geom_text(
+      data = all_tbl %>%
+        group_by(shet_decile) %>%
+        summarise(mean_value = mean(.data[[h2_col]], na.rm = TRUE), median_value = median(.data[[h2_col]], na.rm = TRUE), .groups = "drop"),
+      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "#B22222",
+      size = 2.5,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = all_tbl %>%
+        group_by(shet_decile) %>%
+        summarise(mean_value = mean(.data[[h2_col]], na.rm = TRUE), median_value = median(.data[[h2_col]], na.rm = TRUE), .groups = "drop"),
+      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "#2A9D8F",
+      size = 2.5,
+      vjust = 1.2
+    ) +
     labs(
       title = paste0("h2 distribution vs s_het decile (all expressed genes, ", h2_label, ")"),
-      subtitle = "Boxplot with mean (red) and median (green) markers",
+      subtitle = "Boxplot with mean/median markers and numeric labels",
       x = "s_het post_mean decile (1-10)",
       y = "h2_GREML"
     ) +
@@ -1076,13 +1120,33 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
   ggsave(file.path(plots_dir, "plotE_h2_distribution_vs_shet_decile_all_expressed.png"), p_h2_shet_all, width = 10, height = 5.5, dpi = 300)
 
   if (nrow(ex_tbl) > 0L) {
+    h2_shet_ex_stats <- ex_tbl %>%
+      group_by(shet_decile) %>%
+      summarise(mean_value = mean(.data[[h2_col]], na.rm = TRUE), median_value = median(.data[[h2_col]], na.rm = TRUE), .groups = "drop")
+
     p_h2_shet_ex <- ggplot(ex_tbl, aes(x = factor(shet_decile), y = .data[[h2_col]])) +
       geom_boxplot(outlier.alpha = 0.2, fill = "#FCE8E6", color = "#6D597A") +
       stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
       stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+      geom_text(
+        data = h2_shet_ex_stats,
+        aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+        inherit.aes = FALSE,
+        color = "#B22222",
+        size = 2.5,
+        vjust = -0.6
+      ) +
+      geom_text(
+        data = h2_shet_ex_stats,
+        aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+        inherit.aes = FALSE,
+        color = "#2A9D8F",
+        size = 2.5,
+        vjust = 1.2
+      ) +
       labs(
         title = paste0("h2 distribution vs s_het decile (excluding near-zero, ", h2_label, ")"),
-        subtitle = "Boxplot with mean (red) and median (green) markers",
+        subtitle = "Boxplot with mean/median markers and numeric labels",
         x = "s_het post_mean decile (1-10)",
         y = "h2_GREML"
       ) +
@@ -1091,13 +1155,33 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     ggsave(file.path(plots_dir, "plotF_h2_distribution_vs_shet_decile_excluding_near_zero.png"), p_h2_shet_ex, width = 10, height = 5.5, dpi = 300)
   }
 
+  h2_tpm_all_stats <- all_tbl %>%
+    group_by(tpm_decile) %>%
+    summarise(mean_value = mean(.data[[h2_col]], na.rm = TRUE), median_value = median(.data[[h2_col]], na.rm = TRUE), .groups = "drop")
+
   p_h2_tpm_all <- ggplot(all_tbl, aes(x = factor(tpm_decile), y = .data[[h2_col]])) +
     geom_boxplot(outlier.alpha = 0.2, fill = "#FFF3CD", color = "#264653") +
     stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
     stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    geom_text(
+      data = h2_tpm_all_stats,
+      aes(x = factor(tpm_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "#B22222",
+      size = 2.5,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = h2_tpm_all_stats,
+      aes(x = factor(tpm_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "#2A9D8F",
+      size = 2.5,
+      vjust = 1.2
+    ) +
     labs(
       title = paste0("h2 distribution vs TPM decile (all expressed genes, ", h2_label, ")"),
-      subtitle = "Boxplot with mean (red) and median (green) markers",
+      subtitle = "Boxplot with mean/median markers and numeric labels",
       x = "TPM decile (1-10)",
       y = "h2_GREML"
     ) +
@@ -1106,13 +1190,33 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
   ggsave(file.path(plots_dir, "plotG_h2_distribution_vs_tpm_decile_all_expressed.png"), p_h2_tpm_all, width = 10, height = 5.5, dpi = 300)
 
   if (nrow(ex_tbl) > 0L) {
+    h2_tpm_ex_stats <- ex_tbl %>%
+      group_by(tpm_decile) %>%
+      summarise(mean_value = mean(.data[[h2_col]], na.rm = TRUE), median_value = median(.data[[h2_col]], na.rm = TRUE), .groups = "drop")
+
     p_h2_tpm_ex <- ggplot(ex_tbl, aes(x = factor(tpm_decile), y = .data[[h2_col]])) +
       geom_boxplot(outlier.alpha = 0.2, fill = "#E9ECEF", color = "#4A4E69") +
       stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
       stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+      geom_text(
+        data = h2_tpm_ex_stats,
+        aes(x = factor(tpm_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+        inherit.aes = FALSE,
+        color = "#B22222",
+        size = 2.5,
+        vjust = -0.6
+      ) +
+      geom_text(
+        data = h2_tpm_ex_stats,
+        aes(x = factor(tpm_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+        inherit.aes = FALSE,
+        color = "#2A9D8F",
+        size = 2.5,
+        vjust = 1.2
+      ) +
       labs(
         title = paste0("h2 distribution vs TPM decile (excluding near-zero, ", h2_label, ")"),
-        subtitle = "Boxplot with mean (red) and median (green) markers",
+        subtitle = "Boxplot with mean/median markers and numeric labels",
         x = "TPM decile (1-10)",
         y = "h2_GREML"
       ) +
@@ -1123,9 +1227,17 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
 
   fwrite(as.data.table(all_tbl), file.path(tables_dir, "additional_analysis_all_genes.tsv"), sep = "\t")
   fwrite(as.data.table(ex_tbl), file.path(tables_dir, "additional_analysis_excluding_near_zero.tsv"), sep = "\t")
+  fwrite(as.data.table(tpm_box_stats), file.path(tables_dir, "plotA_tpm_distribution_summary_values.tsv"), sep = "\t")
   fwrite(as.data.table(skew_tbl), file.path(tables_dir, "plotB_tpm_skewness_vs_shet_decile.tsv"), sep = "\t")
   fwrite(as.data.table(frac_near0_shet), file.path(tables_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.tsv"), sep = "\t")
   fwrite(as.data.table(frac_near0_tpm), file.path(tables_dir, "plotD_fraction_near_zero_h2_vs_tpm_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(all_tbl %>% group_by(shet_decile) %>% summarise(mean_value = mean(.data[[h2_col]], na.rm = TRUE), median_value = median(.data[[h2_col]], na.rm = TRUE), .groups = "drop")),
+         file.path(tables_dir, "plotE_h2_vs_shet_decile_all_summary_values.tsv"), sep = "\t")
+  fwrite(as.data.table(h2_tpm_all_stats), file.path(tables_dir, "plotG_h2_vs_tpm_decile_all_summary_values.tsv"), sep = "\t")
+  if (nrow(ex_tbl) > 0L) {
+    fwrite(as.data.table(h2_shet_ex_stats), file.path(tables_dir, "plotF_h2_vs_shet_decile_excluding_near_zero_summary_values.tsv"), sep = "\t")
+    fwrite(as.data.table(h2_tpm_ex_stats), file.path(tables_dir, "plotH_h2_vs_tpm_decile_excluding_near_zero_summary_values.tsv"), sep = "\t")
+  }
 }
 
 # --------------------------------------------------
