@@ -81,8 +81,9 @@ h2_frac_cutoff <- as.numeric(Sys.getenv("H2_FRAC_CUTOFF", "0.0005"))
 if (!is.finite(h2_frac_cutoff) || h2_frac_cutoff < 0) {
   stop("H2_FRAC_CUTOFF must be a non-negative numeric value.")
 }
+run_branch_specific_plots <- tolower(Sys.getenv("RUN_BRANCH_SPECIFIC_PLOTS", "false")) %in% c("1", "true", "yes", "y")
 
-analysis_root <- file.path(runs_dir, "_analysis", "shet_tpm_h2_plots")
+analysis_root <- file.path(runs_dir, "_analysis", "shet_tmm_h2_plots_v1")
 dir.create(analysis_root, recursive = TRUE, showWarnings = FALSE)
 
 # --------------------------------------------------
@@ -1258,6 +1259,7 @@ message("Using TPM run:  ", tpm_run_dir)
 h2_method_info <- tibble(
   setting = c(
     "force_tmm_h2",
+    "run_branch_specific_plots",
     "h2_frac_cutoff",
     "input_method_raw",
     "input_method_irnt",
@@ -1272,6 +1274,7 @@ h2_method_info <- tibble(
   ),
   value = c(
     as.character(force_tmm_h2),
+    as.character(run_branch_specific_plots),
     as.character(h2_frac_cutoff),
     method_raw,
     method_irnt,
@@ -1473,112 +1476,116 @@ if (nrow(merged_tpm_irnt_tbl) == 0L) {
   stop("No overlapping genes after merging Shet + TPM + TPM IRNT h2.")
 }
 
-if (nrow(merged_source_raw_tbl) > 0L) {
-  run_shet_h2_triplet(
-    tmm_tbl = merged_raw_tbl,
-    tpm_tbl = merged_tpm_raw_tbl,
-    overlap_tbl = merged_source_raw_tbl,
-    h2_tmm_col = "h2_tmm_raw",
-    h2_tpm_col = "h2_tpm_raw",
-    norm_label = "RAW",
-    suite_name = "shet_vs_h2_triplet_raw"
+if (run_branch_specific_plots) {
+  if (nrow(merged_source_raw_tbl) > 0L) {
+    run_shet_h2_triplet(
+      tmm_tbl = merged_raw_tbl,
+      tpm_tbl = merged_tpm_raw_tbl,
+      overlap_tbl = merged_source_raw_tbl,
+      h2_tmm_col = "h2_tmm_raw",
+      h2_tpm_col = "h2_tpm_raw",
+      norm_label = "RAW",
+      suite_name = "shet_vs_h2_triplet_raw"
+    )
+  } else {
+    message("Skipping Shet-vs-h2 RAW triplet: no overlap between TMM and TPM RAW h2 tables.")
+  }
+
+  if (nrow(merged_source_irnt_tbl) > 0L) {
+    run_shet_h2_triplet(
+      tmm_tbl = merged_irnt_tbl,
+      tpm_tbl = merged_tpm_irnt_tbl,
+      overlap_tbl = merged_source_irnt_tbl,
+      h2_tmm_col = "h2_tmm_irnt",
+      h2_tpm_col = "h2_tpm_irnt",
+      norm_label = "IRNT",
+      suite_name = "shet_vs_h2_triplet_irnt"
+    )
+  } else {
+    message("Skipping Shet-vs-h2 IRNT triplet: no overlap between TMM and TPM IRNT h2 tables.")
+  }
+
+  run_plot_suite_single(
+    df = merged_raw_tbl,
+    h2_col = "h2_tmm_raw",
+    h2_label = "RAW",
+    suite_name = "raw_only_all_genes",
+    suite_subtitle = "All PASS genes with Shet+TPM+TMM RAW h2 overlap"
   )
-} else {
-  message("Skipping Shet-vs-h2 RAW triplet: no overlap between TMM and TPM RAW h2 tables.")
-}
 
-if (nrow(merged_source_irnt_tbl) > 0L) {
-  run_shet_h2_triplet(
-    tmm_tbl = merged_irnt_tbl,
-    tpm_tbl = merged_tpm_irnt_tbl,
-    overlap_tbl = merged_source_irnt_tbl,
-    h2_tmm_col = "h2_tmm_irnt",
-    h2_tpm_col = "h2_tpm_irnt",
-    norm_label = "IRNT",
-    suite_name = "shet_vs_h2_triplet_irnt"
+  run_decile_sensitivity_single(
+    df = merged_raw_tbl,
+    h2_col = "h2_tmm_raw",
+    h2_label = "RAW",
+    suite_name = "raw_only_all_genes",
+    suite_subtitle = "All PASS genes with Shet+TPM+TMM RAW h2 overlap",
+    shet_reference_tbl = shet_tbl,
+    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
   )
-} else {
-  message("Skipping Shet-vs-h2 IRNT triplet: no overlap between TMM and TPM IRNT h2 tables.")
-}
 
-run_plot_suite_single(
-  df = merged_raw_tbl,
-  h2_col = "h2_tmm_raw",
-  h2_label = "RAW",
-  suite_name = "raw_only_all_genes",
-  suite_subtitle = "All PASS genes with Shet+TPM+TMM RAW h2 overlap"
-)
-
-run_decile_sensitivity_single(
-  df = merged_raw_tbl,
-  h2_col = "h2_tmm_raw",
-  h2_label = "RAW",
-  suite_name = "raw_only_all_genes",
-  suite_subtitle = "All PASS genes with Shet+TPM+TMM RAW h2 overlap",
-  shet_reference_tbl = shet_tbl,
-  shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
-)
-
-run_plot_suite_single(
-  df = merged_irnt_tbl,
-  h2_col = "h2_tmm_irnt",
-  h2_label = "IRNT",
-  suite_name = "irnt_only_all_genes",
-  suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap"
-)
-
-run_decile_sensitivity_single(
-  df = merged_irnt_tbl,
-  h2_col = "h2_tmm_irnt",
-  h2_label = "IRNT",
-  suite_name = "irnt_only_all_genes",
-  suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap",
-  shet_reference_tbl = shet_tbl,
-  shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
-)
-
-run_additional_decile_analyses(
-  df_all = merged_raw_all_tbl,
-  df_ex = merged_raw_tbl,
-  h2_col = "h2_tmm_raw",
-  near_zero_col = "h2_tmm_raw_near_zero",
-  h2_label = "RAW",
-  suite_name = "additional_decile_diagnostics_raw"
-)
-
-run_additional_decile_analyses(
-  df_all = merged_irnt_all_tbl,
-  df_ex = merged_irnt_tbl,
-  h2_col = "h2_tmm_irnt",
-  near_zero_col = "h2_tmm_irnt_near_zero",
-  h2_label = "IRNT",
-  suite_name = "additional_decile_diagnostics_irnt"
-)
-
-if (nrow(merged_source_raw_tbl) > 0L) {
-  run_h2_source_comparison(
-    df = merged_source_raw_tbl,
-    h2_tmm_col = "h2_tmm_raw",
-    h2_tpm_col = "h2_tpm_raw",
-    norm_label = "RAW",
-    suite_name = "h2_source_compare_raw_all_genes",
-    suite_subtitle = "Genes with Shet+TPM+both TMM/TPM RAW h2 overlap"
+  run_plot_suite_single(
+    df = merged_irnt_tbl,
+    h2_col = "h2_tmm_irnt",
+    h2_label = "IRNT",
+    suite_name = "irnt_only_all_genes",
+    suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap"
   )
-} else {
-  message("Skipping RAW h2 source comparison: no overlap between TMM and TPM RAW h2.")
-}
 
-if (nrow(merged_source_irnt_tbl) > 0L) {
-  run_h2_source_comparison(
-    df = merged_source_irnt_tbl,
-    h2_tmm_col = "h2_tmm_irnt",
-    h2_tpm_col = "h2_tpm_irnt",
-    norm_label = "IRNT",
-    suite_name = "h2_source_compare_irnt_all_genes",
-    suite_subtitle = "Genes with Shet+TPM+both TMM/TPM IRNT h2 overlap"
+  run_decile_sensitivity_single(
+    df = merged_irnt_tbl,
+    h2_col = "h2_tmm_irnt",
+    h2_label = "IRNT",
+    suite_name = "irnt_only_all_genes",
+    suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap",
+    shet_reference_tbl = shet_tbl,
+    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
   )
+
+  run_additional_decile_analyses(
+    df_all = merged_raw_all_tbl,
+    df_ex = merged_raw_tbl,
+    h2_col = "h2_tmm_raw",
+    near_zero_col = "h2_tmm_raw_near_zero",
+    h2_label = "RAW",
+    suite_name = "additional_decile_diagnostics_raw"
+  )
+
+  run_additional_decile_analyses(
+    df_all = merged_irnt_all_tbl,
+    df_ex = merged_irnt_tbl,
+    h2_col = "h2_tmm_irnt",
+    near_zero_col = "h2_tmm_irnt_near_zero",
+    h2_label = "IRNT",
+    suite_name = "additional_decile_diagnostics_irnt"
+  )
+
+  if (nrow(merged_source_raw_tbl) > 0L) {
+    run_h2_source_comparison(
+      df = merged_source_raw_tbl,
+      h2_tmm_col = "h2_tmm_raw",
+      h2_tpm_col = "h2_tpm_raw",
+      norm_label = "RAW",
+      suite_name = "h2_source_compare_raw_all_genes",
+      suite_subtitle = "Genes with Shet+TPM+both TMM/TPM RAW h2 overlap"
+    )
+  } else {
+    message("Skipping RAW h2 source comparison: no overlap between TMM and TPM RAW h2.")
+  }
+
+  if (nrow(merged_source_irnt_tbl) > 0L) {
+    run_h2_source_comparison(
+      df = merged_source_irnt_tbl,
+      h2_tmm_col = "h2_tmm_irnt",
+      h2_tpm_col = "h2_tpm_irnt",
+      norm_label = "IRNT",
+      suite_name = "h2_source_compare_irnt_all_genes",
+      suite_subtitle = "Genes with Shet+TPM+both TMM/TPM IRNT h2 overlap"
+    )
+  } else {
+    message("Skipping IRNT h2 source comparison: no overlap between TMM and TPM IRNT h2.")
+  }
 } else {
-  message("Skipping IRNT h2 source comparison: no overlap between TMM and TPM IRNT h2.")
+  message("Skipping branch-specific RAW-only/IRNT-only suites (RUN_BRANCH_SPECIFIC_PLOTS=false).")
 }
 
 if (nrow(merged_pair_tbl) > 0L) {
