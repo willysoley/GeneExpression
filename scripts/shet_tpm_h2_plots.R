@@ -166,7 +166,7 @@ resolve_gene_ids_for_summary <- function(gene_raw, run_dir) {
   normalize_gene_id(resolved)
 }
 
-read_h2_by_gene <- function(run_dir, h2_col_name) {
+read_h2_by_gene_bundle <- function(run_dir, h2_col_name) {
   sum_file <- list.files(file.path(run_dir, "results", "summary"), pattern = "^final_heritability_summary.*\\.tsv$", full.names = TRUE)
   if (length(sum_file) == 0L) stop("Missing summary file in: ", run_dir)
 
@@ -176,14 +176,35 @@ read_h2_by_gene <- function(run_dir, h2_col_name) {
     stop("Summary file missing required columns (Gene, Status, h2_GREML): ", sum_file[1])
   }
 
-  tibble(
+  pass_tbl <- tibble(
     Gene = resolve_gene_ids_for_summary(dt$Gene, run_dir),
     Status = toupper(str_trim(as.character(dt$Status))),
     h2 = suppressWarnings(as.numeric(dt$h2_GREML))
   ) %>%
-    filter(Status == "PASS", is.finite(h2)) %>%
+    filter(Status == "PASS", is.finite(h2))
+
+  epsilon <- min(pass_tbl$h2, na.rm = TRUE)
+  near_zero_tbl <- pass_tbl %>%
+    group_by(Gene) %>%
+    summarise(is_near_zero = any(h2 <= epsilon), .groups = "drop")
+
+  all_tbl <- pass_tbl %>%
     group_by(Gene) %>%
     summarise(!!h2_col_name := mean(h2, na.rm = TRUE), .groups = "drop")
+
+  ex_tbl <- pass_tbl %>%
+    filter(h2 > epsilon) %>%
+    group_by(Gene) %>%
+    summarise(!!h2_col_name := mean(h2, na.rm = TRUE), .groups = "drop")
+
+  list(
+    all_tbl = all_tbl,
+    ex_tbl = ex_tbl,
+    near_zero_tbl = near_zero_tbl,
+    epsilon = epsilon,
+    n_pass_rows = nrow(pass_tbl),
+    n_ex_rows = nrow(pass_tbl %>% filter(h2 > epsilon))
+  )
 }
 
 read_tpm_metrics_by_gene <- function(run_dir) {
@@ -928,6 +949,185 @@ run_shet_h2_triplet <- function(
   fwrite(as.data.table(overlap_long), file.path(tables_dir, paste0("shet_vs_h2_overlap_tpm_tmm_", norm_key, "_gene_level.tsv")), sep = "\t")
 }
 
+skewness_moment <- function(x) {
+  x <- x[is.finite(x)]
+  n <- length(x)
+  if (n < 3L) return(NA_real_)
+  s <- sd(x)
+  if (!is.finite(s) || s == 0) return(0)
+  m <- mean(x)
+  mean(((x - m) / s)^3)
+}
+
+run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col, h2_label, suite_name) {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+  dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+  all_tbl <- df_all %>%
+    mutate(
+      is_near_zero = if_else(is.na(.data[[near_zero_col]]), FALSE, as.logical(.data[[near_zero_col]])),
+      shet_decile = ntile(post_mean, n_deciles),
+      tpm_decile = ntile(mean_tpm, n_deciles)
+    ) %>%
+    filter(is.finite(.data[[h2_col]]), is.finite(mean_tpm), is.finite(median_tpm))
+
+  ex_tbl <- df_ex %>%
+    mutate(
+      shet_decile = ntile(post_mean, n_deciles),
+      tpm_decile = ntile(mean_tpm, n_deciles)
+    ) %>%
+    filter(is.finite(.data[[h2_col]]), is.finite(mean_tpm), is.finite(median_tpm))
+
+  if (nrow(all_tbl) == 0L) return(invisible(NULL))
+
+  tpm_long <- all_tbl %>%
+    select(shet_decile, mean_tpm, median_tpm) %>%
+    pivot_longer(cols = c(mean_tpm, median_tpm), names_to = "tpm_metric", values_to = "tpm_value") %>%
+    mutate(tpm_metric = recode(tpm_metric, mean_tpm = "Mean TPM", median_tpm = "Median TPM"))
+
+  p_tpm_dist <- ggplot(tpm_long, aes(x = factor(shet_decile), y = tpm_value)) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#DDEAF6", color = "#1D3557") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    facet_wrap(~tpm_metric, scales = "free_y") +
+    labs(
+      title = paste0("TPM distribution vs s_het decile (", h2_label, " branch)"),
+      subtitle = "Boxplot with mean (red) and median (green) markers",
+      x = "s_het post_mean decile (1-10)",
+      y = "TPM"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotA_tpm_distribution_vs_shet_decile_box.png"), p_tpm_dist, width = 10, height = 5.5, dpi = 300)
+
+  skew_tbl <- all_tbl %>%
+    group_by(shet_decile) %>%
+    summarise(
+      n_genes = n(),
+      skew_mean_tpm = skewness_moment(mean_tpm),
+      skew_median_tpm = skewness_moment(median_tpm),
+      .groups = "drop"
+    ) %>%
+    pivot_longer(cols = c(skew_mean_tpm, skew_median_tpm), names_to = "metric", values_to = "skewness") %>%
+    mutate(metric = recode(metric, skew_mean_tpm = "Mean TPM skewness", skew_median_tpm = "Median TPM skewness"))
+
+  p_skew <- ggplot(skew_tbl, aes(x = factor(shet_decile), y = skewness, color = metric, group = metric)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    labs(
+      title = paste0("TPM skewness vs s_het decile (", h2_label, " branch)"),
+      x = "s_het post_mean decile (1-10)",
+      y = "Skewness",
+      color = "Metric"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotB_tpm_skewness_vs_shet_decile.png"), p_skew, width = 9, height = 5, dpi = 300)
+
+  frac_near0_shet <- all_tbl %>%
+    group_by(shet_decile) %>%
+    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero, na.rm = TRUE), .groups = "drop")
+
+  p_frac_shet <- ggplot(frac_near0_shet, aes(x = factor(shet_decile), y = frac_near_zero_h2, group = 1)) +
+    geom_line(linewidth = 1, color = "#B22222") +
+    geom_point(size = 2, color = "#B22222") +
+    labs(
+      title = paste0("Fraction near-zero h2 vs s_het decile (", h2_label, " branch)"),
+      subtitle = "Near-zero defined with epsilon = min(h2_GREML) in PASS table",
+      x = "s_het post_mean decile (1-10)",
+      y = "Fraction near-zero h2 genes"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.png"), p_frac_shet, width = 9, height = 5, dpi = 300)
+
+  frac_near0_tpm <- all_tbl %>%
+    group_by(tpm_decile) %>%
+    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero, na.rm = TRUE), .groups = "drop")
+
+  p_frac_tpm <- ggplot(frac_near0_tpm, aes(x = factor(tpm_decile), y = frac_near_zero_h2, group = 1)) +
+    geom_line(linewidth = 1, color = "#8A2BE2") +
+    geom_point(size = 2, color = "#8A2BE2") +
+    labs(
+      title = paste0("Fraction near-zero h2 vs TPM decile (", h2_label, " branch)"),
+      subtitle = "Near-zero defined with epsilon = min(h2_GREML) in PASS table",
+      x = "TPM decile (1-10)",
+      y = "Fraction near-zero h2 genes"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotD_fraction_near_zero_h2_vs_tpm_decile.png"), p_frac_tpm, width = 9, height = 5, dpi = 300)
+
+  p_h2_shet_all <- ggplot(all_tbl, aes(x = factor(shet_decile), y = .data[[h2_col]])) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#E8F3E8", color = "#264653") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    labs(
+      title = paste0("h2 distribution vs s_het decile (all expressed genes, ", h2_label, ")"),
+      subtitle = "Boxplot with mean (red) and median (green) markers",
+      x = "s_het post_mean decile (1-10)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotE_h2_distribution_vs_shet_decile_all_expressed.png"), p_h2_shet_all, width = 10, height = 5.5, dpi = 300)
+
+  if (nrow(ex_tbl) > 0L) {
+    p_h2_shet_ex <- ggplot(ex_tbl, aes(x = factor(shet_decile), y = .data[[h2_col]])) +
+      geom_boxplot(outlier.alpha = 0.2, fill = "#FCE8E6", color = "#6D597A") +
+      stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+      stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+      labs(
+        title = paste0("h2 distribution vs s_het decile (excluding near-zero, ", h2_label, ")"),
+        subtitle = "Boxplot with mean (red) and median (green) markers",
+        x = "s_het post_mean decile (1-10)",
+        y = "h2_GREML"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(panel.grid.minor = element_blank())
+    ggsave(file.path(plots_dir, "plotF_h2_distribution_vs_shet_decile_excluding_near_zero.png"), p_h2_shet_ex, width = 10, height = 5.5, dpi = 300)
+  }
+
+  p_h2_tpm_all <- ggplot(all_tbl, aes(x = factor(tpm_decile), y = .data[[h2_col]])) +
+    geom_boxplot(outlier.alpha = 0.2, fill = "#FFF3CD", color = "#264653") +
+    stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+    stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+    labs(
+      title = paste0("h2 distribution vs TPM decile (all expressed genes, ", h2_label, ")"),
+      subtitle = "Boxplot with mean (red) and median (green) markers",
+      x = "TPM decile (1-10)",
+      y = "h2_GREML"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "plotG_h2_distribution_vs_tpm_decile_all_expressed.png"), p_h2_tpm_all, width = 10, height = 5.5, dpi = 300)
+
+  if (nrow(ex_tbl) > 0L) {
+    p_h2_tpm_ex <- ggplot(ex_tbl, aes(x = factor(tpm_decile), y = .data[[h2_col]])) +
+      geom_boxplot(outlier.alpha = 0.2, fill = "#E9ECEF", color = "#4A4E69") +
+      stat_summary(fun = mean, geom = "point", color = "#B22222", size = 2) +
+      stat_summary(fun = median, geom = "point", color = "#2A9D8F", shape = 17, size = 2) +
+      labs(
+        title = paste0("h2 distribution vs TPM decile (excluding near-zero, ", h2_label, ")"),
+        subtitle = "Boxplot with mean (red) and median (green) markers",
+        x = "TPM decile (1-10)",
+        y = "h2_GREML"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(panel.grid.minor = element_blank())
+    ggsave(file.path(plots_dir, "plotH_h2_distribution_vs_tpm_decile_excluding_near_zero.png"), p_h2_tpm_ex, width = 10, height = 5.5, dpi = 300)
+  }
+
+  fwrite(as.data.table(all_tbl), file.path(tables_dir, "additional_analysis_all_genes.tsv"), sep = "\t")
+  fwrite(as.data.table(ex_tbl), file.path(tables_dir, "additional_analysis_excluding_near_zero.tsv"), sep = "\t")
+  fwrite(as.data.table(skew_tbl), file.path(tables_dir, "plotB_tpm_skewness_vs_shet_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(frac_near0_shet), file.path(tables_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(frac_near0_tpm), file.path(tables_dir, "plotD_fraction_near_zero_h2_vs_tpm_decile.tsv"), sep = "\t")
+}
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
@@ -973,7 +1173,6 @@ h2_method_info <- tibble(
     tpm_h2_irnt_run_dir
   )
 )
-fwrite(as.data.table(h2_method_info), file.path(analysis_root, "h2_method_info.tsv"), sep = "\t")
 
 if (!file.exists(shet_xlsx)) {
   stop("SHET_XLSX not found: ", shet_xlsx)
@@ -995,21 +1194,84 @@ shet_tbl <- shet_tbl %>%
   summarise(post_mean = mean(post_mean, na.rm = TRUE), .groups = "drop")
 
 tpm_metrics_tbl <- read_tpm_metrics_by_gene(tpm_run_dir)
-h2_tmm_raw_tbl <- read_h2_by_gene(raw_run_dir, h2_col_name = "h2_tmm_raw")
-h2_tmm_irnt_tbl <- read_h2_by_gene(irnt_run_dir, h2_col_name = "h2_tmm_irnt")
-h2_tpm_raw_tbl <- read_h2_by_gene(tpm_h2_raw_run_dir, h2_col_name = "h2_tpm_raw")
-h2_tpm_irnt_tbl <- read_h2_by_gene(tpm_h2_irnt_run_dir, h2_col_name = "h2_tpm_irnt")
+h2_tmm_raw_bundle <- read_h2_by_gene_bundle(raw_run_dir, h2_col_name = "h2_tmm_raw")
+h2_tmm_irnt_bundle <- read_h2_by_gene_bundle(irnt_run_dir, h2_col_name = "h2_tmm_irnt")
+h2_tpm_raw_bundle <- read_h2_by_gene_bundle(tpm_h2_raw_run_dir, h2_col_name = "h2_tpm_raw")
+h2_tpm_irnt_bundle <- read_h2_by_gene_bundle(tpm_h2_irnt_run_dir, h2_col_name = "h2_tpm_irnt")
+
+h2_tmm_raw_all_tbl <- h2_tmm_raw_bundle$all_tbl
+h2_tmm_irnt_all_tbl <- h2_tmm_irnt_bundle$all_tbl
+h2_tpm_raw_all_tbl <- h2_tpm_raw_bundle$all_tbl
+h2_tpm_irnt_all_tbl <- h2_tpm_irnt_bundle$all_tbl
+
+h2_tmm_raw_tbl <- h2_tmm_raw_bundle$ex_tbl
+h2_tmm_irnt_tbl <- h2_tmm_irnt_bundle$ex_tbl
+h2_tpm_raw_tbl <- h2_tpm_raw_bundle$ex_tbl
+h2_tpm_irnt_tbl <- h2_tpm_irnt_bundle$ex_tbl
+
+h2_tmm_raw_nz_tbl <- h2_tmm_raw_bundle$near_zero_tbl %>% rename(h2_tmm_raw_near_zero = is_near_zero)
+h2_tmm_irnt_nz_tbl <- h2_tmm_irnt_bundle$near_zero_tbl %>% rename(h2_tmm_irnt_near_zero = is_near_zero)
+
+h2_method_info <- bind_rows(
+  h2_method_info,
+  tibble(
+    setting = c(
+      "epsilon_tmm_raw",
+      "epsilon_tmm_irnt",
+      "epsilon_tpm_raw",
+      "epsilon_tpm_irnt",
+      "n_pass_rows_tmm_raw",
+      "n_pass_rows_tmm_irnt",
+      "n_pass_rows_tpm_raw",
+      "n_pass_rows_tpm_irnt",
+      "n_rows_after_excluding_epsilon_tmm_raw",
+      "n_rows_after_excluding_epsilon_tmm_irnt",
+      "n_rows_after_excluding_epsilon_tpm_raw",
+      "n_rows_after_excluding_epsilon_tpm_irnt"
+    ),
+    value = c(
+      as.character(h2_tmm_raw_bundle$epsilon),
+      as.character(h2_tmm_irnt_bundle$epsilon),
+      as.character(h2_tpm_raw_bundle$epsilon),
+      as.character(h2_tpm_irnt_bundle$epsilon),
+      as.character(h2_tmm_raw_bundle$n_pass_rows),
+      as.character(h2_tmm_irnt_bundle$n_pass_rows),
+      as.character(h2_tpm_raw_bundle$n_pass_rows),
+      as.character(h2_tpm_irnt_bundle$n_pass_rows),
+      as.character(h2_tmm_raw_bundle$n_ex_rows),
+      as.character(h2_tmm_irnt_bundle$n_ex_rows),
+      as.character(h2_tpm_raw_bundle$n_ex_rows),
+      as.character(h2_tpm_irnt_bundle$n_ex_rows)
+    )
+  )
+)
+fwrite(as.data.table(h2_method_info), file.path(analysis_root, "h2_method_info.tsv"), sep = "\t")
+
 shet_tpm_overlap_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl %>% select(Gene), by = "Gene")
+
+merged_raw_all_tbl <- shet_tbl %>%
+  inner_join(tpm_metrics_tbl, by = "Gene") %>%
+  inner_join(h2_tmm_raw_all_tbl, by = "Gene") %>%
+  left_join(h2_tmm_raw_nz_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
+merged_irnt_all_tbl <- shet_tbl %>%
+  inner_join(tpm_metrics_tbl, by = "Gene") %>%
+  inner_join(h2_tmm_irnt_all_tbl, by = "Gene") %>%
+  left_join(h2_tmm_irnt_nz_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
 merged_raw_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl, by = "Gene") %>%
   inner_join(h2_tmm_raw_tbl, by = "Gene") %>%
+  left_join(h2_tmm_raw_nz_tbl, by = "Gene") %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
 merged_irnt_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl, by = "Gene") %>%
   inner_join(h2_tmm_irnt_tbl, by = "Gene") %>%
+  left_join(h2_tmm_irnt_nz_tbl, by = "Gene") %>%
   mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
 merged_source_raw_tbl <- merged_raw_tbl %>%
@@ -1045,6 +1307,12 @@ gene_count_audit <- tibble(
     "h2_tmm_irnt_tbl",
     "h2_tpm_raw_tbl",
     "h2_tpm_irnt_tbl",
+    "h2_tmm_raw_all_tbl",
+    "h2_tmm_irnt_all_tbl",
+    "h2_tpm_raw_all_tbl",
+    "h2_tpm_irnt_all_tbl",
+    "merged_raw_all_tbl",
+    "merged_irnt_all_tbl",
     "merged_raw_tbl",
     "merged_irnt_tbl",
     "merged_tpm_raw_tbl",
@@ -1060,6 +1328,12 @@ gene_count_audit <- tibble(
     nrow(h2_tmm_irnt_tbl),
     nrow(h2_tpm_raw_tbl),
     nrow(h2_tpm_irnt_tbl),
+    nrow(h2_tmm_raw_all_tbl),
+    nrow(h2_tmm_irnt_all_tbl),
+    nrow(h2_tpm_raw_all_tbl),
+    nrow(h2_tpm_irnt_all_tbl),
+    nrow(merged_raw_all_tbl),
+    nrow(merged_irnt_all_tbl),
     nrow(merged_raw_tbl),
     nrow(merged_irnt_tbl),
     nrow(merged_tpm_raw_tbl),
@@ -1149,6 +1423,24 @@ run_decile_sensitivity_single(
   suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap",
   shet_reference_tbl = shet_tbl,
   shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
+)
+
+run_additional_decile_analyses(
+  df_all = merged_raw_all_tbl,
+  df_ex = merged_raw_tbl,
+  h2_col = "h2_tmm_raw",
+  near_zero_col = "h2_tmm_raw_near_zero",
+  h2_label = "RAW",
+  suite_name = "additional_decile_diagnostics_raw"
+)
+
+run_additional_decile_analyses(
+  df_all = merged_irnt_all_tbl,
+  df_ex = merged_irnt_tbl,
+  h2_col = "h2_tmm_irnt",
+  near_zero_col = "h2_tmm_irnt_near_zero",
+  h2_label = "IRNT",
+  suite_name = "additional_decile_diagnostics_irnt"
 )
 
 if (nrow(merged_source_raw_tbl) > 0L) {
