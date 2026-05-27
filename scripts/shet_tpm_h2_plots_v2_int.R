@@ -9,4 +9,4 @@ Sys.setenv(
   ANALYSIS_LABEL = "shet_tmm_h2_plots_v2_int"
 )
 
-source("/Users/sl8085/Documents/MostafaviLab/Git/GeneExpression/scripts/shet_tpm_h2_plots.R", local = FALSE)
+source("/gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression/scripts/shet_tpm_h2_plots.R", local = FALSE)
