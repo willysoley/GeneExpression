@@ -294,7 +294,7 @@ plot_h2_shet <- function(df, x_mode, out_file) {
   ggsave(out_file, p, width = 8, height = 5, dpi = 300)
 }
 
-run_plot_suite <- function(df, suite_name, suite_subtitle) {
+run_plot_suite_pair <- function(df, suite_name, suite_subtitle) {
   suite_root <- file.path(analysis_root, suite_name)
   plots_dir <- file.path(suite_root, "plots")
   tables_dir <- file.path(suite_root, "tables")
@@ -307,6 +307,33 @@ run_plot_suite <- function(df, suite_name, suite_subtitle) {
       mean_tpm_decile = ntile(mean_tpm, n_deciles),
       median_tpm_decile = ntile(median_tpm, n_deciles)
     )
+
+  # Non-decile scatter views (gene-level dots)
+  p_scatter_shet_tpm <- ggplot(suite_tbl, aes(x = post_mean, y = mean_tpm)) +
+    geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
+    labs(
+      title = "Gene-level scatter: s_het post_mean vs mean TPM",
+      subtitle = suite_subtitle,
+      x = "s_het post_mean",
+      y = "Mean TPM"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "scatter_shet_vs_mean_tpm.png"), p_scatter_shet_tpm, width = 8, height = 5, dpi = 300)
+
+  p_scatter_h2_pair <- ggplot(suite_tbl, aes(x = h2_tmm_raw, y = h2_tmm_irnt)) +
+    geom_point(alpha = 0.3, size = 0.7, color = "#2A6F9E") +
+    geom_smooth(method = "lm", se = FALSE, linewidth = 1, color = "#B22222") +
+    labs(
+      title = "Gene-level scatter: TMM h2 RAW vs TMM h2 IRNT",
+      subtitle = suite_subtitle,
+      x = "TMM h2 RAW",
+      y = "TMM h2 IRNT"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "scatter_h2_raw_vs_irnt.png"), p_scatter_h2_pair, width = 8, height = 5, dpi = 300)
 
   # Plot 1: Shet decile vs mean/median TPM
   p1_decile_tbl <- suite_tbl %>%
@@ -422,6 +449,8 @@ run_plot_suite <- function(df, suite_name, suite_subtitle) {
   message(" - ", file.path(plots_dir, "plot2_tpm_decile_vs_h2_raw_irnt_correlation_mean_median.png"))
   message(" - ", file.path(plots_dir, "plot3_shet_actual_vs_h2_raw_irnt_lines.png"))
   message(" - ", file.path(plots_dir, "plot3_shet_decile_vs_h2_raw_irnt_mean_median_lines.png"))
+  message(" - ", file.path(plots_dir, "scatter_shet_vs_mean_tpm.png"))
+  message(" - ", file.path(plots_dir, "scatter_h2_raw_vs_irnt.png"))
   message("Tables:")
   message(" - ", file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"))
   message(" - ", file.path(tables_dir, "plot1_shet_decile_vs_tpm_mean_median.tsv"))
@@ -452,7 +481,7 @@ make_decile_map <- function(reference_tbl, source_label, direction = c("ascendin
     )
 }
 
-run_decile_sensitivity <- function(
+run_decile_sensitivity_pair <- function(
   df,
   suite_name,
   suite_subtitle,
@@ -621,6 +650,218 @@ run_decile_sensitivity <- function(
   )
 }
 
+plot_h2_shet_single <- function(df, x_mode, h2_col, h2_label, out_file) {
+  plot_df <- df %>%
+    transmute(
+      post_mean = post_mean,
+      post_mean_bin = post_mean_bin,
+      h2 = .data[[h2_col]]
+    ) %>%
+    filter(is.finite(post_mean), is.finite(h2))
+
+  if (x_mode == "actual") {
+    p <- ggplot(plot_df, aes(x = post_mean, y = h2)) +
+      geom_point(alpha = 0.35, size = 0.7, color = "#1D3557") +
+      geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
+      labs(
+        title = paste0("TMM h2 ", h2_label, " across s_het post_mean"),
+        subtitle = "Gene-level scatter with LOESS trend",
+        x = "s_het post_mean",
+        y = "h2_GREML"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(panel.grid.minor = element_blank())
+  } else {
+    decile_tbl <- plot_df %>%
+      group_by(post_mean_bin) %>%
+      summarise(
+        mean_h2 = mean(h2, na.rm = TRUE),
+        median_h2 = median(h2, na.rm = TRUE),
+        .groups = "drop"
+      ) %>%
+      pivot_longer(
+        cols = c(mean_h2, median_h2),
+        names_to = "stat_type",
+        values_to = "h2_value"
+      ) %>%
+      mutate(stat_type = recode(stat_type, mean_h2 = "Mean h2", median_h2 = "Median h2"))
+
+    p <- ggplot(decile_tbl, aes(x = factor(post_mean_bin), y = h2_value, linetype = stat_type, group = stat_type)) +
+      geom_line(linewidth = 1, color = "#1D3557") +
+      geom_point(size = 1.8, color = "#1D3557") +
+      labs(
+        title = paste0("TMM h2 ", h2_label, ": mean and median by s_het decile"),
+        subtitle = "Each point is a decile-level summary",
+        x = "s_het post_mean decile",
+        y = "h2_GREML",
+        linetype = "Summary"
+      ) +
+      theme_minimal(base_size = 11) +
+      theme(panel.grid.minor = element_blank())
+  }
+
+  ggsave(out_file, p, width = 8, height = 5, dpi = 300)
+}
+
+run_plot_suite_single <- function(df, h2_col, h2_label, suite_name, suite_subtitle) {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+  dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
+  dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
+
+  suite_tbl <- df %>%
+    mutate(
+      post_mean_bin = ntile(post_mean, n_deciles),
+      mean_tpm_decile = ntile(mean_tpm, n_deciles),
+      median_tpm_decile = ntile(median_tpm, n_deciles)
+    )
+
+  # Non-decile scatter views (gene-level dots)
+  p_scatter_shet_tpm <- ggplot(suite_tbl, aes(x = post_mean, y = mean_tpm)) +
+    geom_point(alpha = 0.3, size = 0.7, color = "#1D3557") +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#E76F51") +
+    labs(
+      title = "Gene-level scatter: s_het post_mean vs mean TPM",
+      subtitle = paste0(suite_subtitle, " | h2 branch: ", h2_label),
+      x = "s_het post_mean",
+      y = "Mean TPM"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "scatter_shet_vs_mean_tpm.png"), p_scatter_shet_tpm, width = 8, height = 5, dpi = 300)
+
+  p_scatter_tpm_h2 <- ggplot(suite_tbl, aes(x = mean_tpm, y = .data[[h2_col]])) +
+    geom_point(alpha = 0.3, size = 0.7, color = "#2A6F9E") +
+    geom_smooth(method = "loess", se = FALSE, linewidth = 1, color = "#B22222") +
+    labs(
+      title = paste0("Gene-level scatter: mean TPM vs TMM h2 ", h2_label),
+      subtitle = suite_subtitle,
+      x = "Mean TPM",
+      y = paste0("TMM h2 ", h2_label)
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+  ggsave(file.path(plots_dir, "scatter_mean_tpm_vs_h2_single_norm.png"), p_scatter_tpm_h2, width = 8, height = 5, dpi = 300)
+
+  p1_decile_tbl <- suite_tbl %>%
+    group_by(post_mean_bin) %>%
+    summarise(
+      n_genes = n(),
+      mean_tpm = mean(mean_tpm, na.rm = TRUE),
+      median_tpm = median(median_tpm, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(post_mean_bin)
+
+  p1_decile_long <- p1_decile_tbl %>%
+    pivot_longer(cols = c(mean_tpm, median_tpm), names_to = "metric", values_to = "value") %>%
+    mutate(metric = recode(metric, mean_tpm = "Mean TPM", median_tpm = "Median TPM"))
+
+  p1_decile <- ggplot(p1_decile_long, aes(x = factor(post_mean_bin), y = value, color = metric, group = metric)) +
+    geom_line(linewidth = 1) +
+    geom_point(size = 2) +
+    labs(
+      title = "TPM by s_het decile",
+      subtitle = paste0(suite_subtitle, " | h2 branch: ", h2_label),
+      x = "s_het post_mean decile (1-10)",
+      y = "TPM",
+      color = "TPM summary"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+
+  ggsave(file.path(plots_dir, "plot1_shet_decile_vs_tpm_mean_median.png"), p1_decile, width = 8, height = 5, dpi = 300)
+  fwrite(as.data.table(p1_decile_tbl), file.path(tables_dir, "plot1_shet_decile_vs_tpm_mean_median.tsv"), sep = "\t")
+
+  if (shet_x_mode %in% c("actual", "both")) {
+    plot_h2_shet_single(
+      df = suite_tbl,
+      x_mode = "actual",
+      h2_col = h2_col,
+      h2_label = h2_label,
+      out_file = file.path(plots_dir, "plot3_shet_actual_vs_h2_single_norm.png")
+    )
+  }
+
+  if (shet_x_mode %in% c("decile", "both")) {
+    plot_h2_shet_single(
+      df = suite_tbl,
+      x_mode = "decile",
+      h2_col = h2_col,
+      h2_label = h2_label,
+      out_file = file.path(plots_dir, "plot3_shet_decile_vs_h2_single_norm_mean_median_lines.png")
+    )
+  }
+
+  fwrite(as.data.table(suite_tbl), file.path(tables_dir, "shet_tpm_h2_merged_gene_level.tsv"), sep = "\t")
+}
+
+run_decile_sensitivity_single <- function(df, h2_col, h2_label, suite_name, suite_subtitle, shet_reference_tbl, shet_tpm_overlap_tbl) {
+  suite_root <- file.path(analysis_root, suite_name)
+  plots_dir <- file.path(suite_root, "plots")
+  tables_dir <- file.path(suite_root, "tables")
+
+  decile_maps <- bind_rows(
+    make_decile_map(df, "merged_h2_genes", "ascending"),
+    make_decile_map(shet_reference_tbl, "global_shet_genes", "ascending"),
+    make_decile_map(shet_tpm_overlap_tbl, "shet_tpm_overlap_genes", "ascending")
+  )
+
+  sens_tbl <- decile_maps %>%
+    inner_join(df, by = "Gene") %>%
+    filter(is.finite(post_mean_bin), post_mean_bin >= 1L, post_mean_bin <= n_deciles)
+
+  if (nrow(sens_tbl) == 0L) return(invisible(NULL))
+
+  sens_decile_summary <- sens_tbl %>%
+    group_by(decile_source, decile_direction, post_mean_bin) %>%
+    summarise(
+      n_genes = n(),
+      mean_tpm = mean(mean_tpm, na.rm = TRUE),
+      mean_h2 = mean(.data[[h2_col]], na.rm = TRUE),
+      median_h2 = median(.data[[h2_col]], na.rm = TRUE),
+      prop_h2_gt_0p05 = mean(.data[[h2_col]] > 0.05, na.rm = TRUE),
+      .groups = "drop"
+    ) %>%
+    arrange(decile_source, decile_direction, post_mean_bin)
+
+  fwrite(as.data.table(sens_decile_summary), file.path(tables_dir, "decile_sensitivity_summary_single_norm.tsv"), sep = "\t")
+
+  dual_tbl <- sens_decile_summary %>%
+    group_by(decile_source) %>%
+    mutate(
+      h2_min = min(mean_h2, na.rm = TRUE),
+      h2_max = max(mean_h2, na.rm = TRUE),
+      frac_min = min(prop_h2_gt_0p05, na.rm = TRUE),
+      frac_max = max(prop_h2_gt_0p05, na.rm = TRUE),
+      frac_scaled = if_else(
+        is.finite(frac_max - frac_min) & (frac_max - frac_min) > 0,
+        h2_min + (prop_h2_gt_0p05 - frac_min) * (h2_max - h2_min) / (frac_max - frac_min),
+        h2_min
+      )
+    ) %>%
+    ungroup()
+
+  p_dual <- ggplot(dual_tbl, aes(x = post_mean_bin)) +
+    geom_line(aes(y = mean_h2), color = "#2A6F9E", linewidth = 1) +
+    geom_point(aes(y = mean_h2), color = "#2A6F9E", size = 1.8, alpha = 0.8) +
+    geom_line(aes(y = frac_scaled), color = "#B22222", linewidth = 1) +
+    geom_point(aes(y = frac_scaled), color = "#B22222", size = 1.8, alpha = 0.8) +
+    scale_x_continuous(breaks = 1:10) +
+    facet_wrap(~decile_source, scales = "free_y", ncol = 3) +
+    labs(
+      title = paste0("Decile sensitivity recreation view (", h2_label, ")"),
+      subtitle = paste0(suite_subtitle, " | blue = mean h2, red = fraction h2 > 0.05"),
+      x = "Decile of selective constraint",
+      y = "Mean expression h2; decile 10 = highest constraint"
+    ) +
+    theme_minimal(base_size = 11) +
+    theme(panel.grid.minor = element_blank())
+
+  ggsave(file.path(plots_dir, "decile_sensitivity_recreation_single_norm.png"), p_dual, width = 14, height = 6.5, dpi = 300)
+}
+
 # --------------------------------------------------
 # Main
 # --------------------------------------------------
@@ -682,59 +923,166 @@ h2_tmm_irnt_tbl <- read_h2_by_gene(irnt_run_dir, h2_col_name = "h2_tmm_irnt")
 shet_tpm_overlap_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl %>% select(Gene), by = "Gene")
 
-merged_tbl <- shet_tbl %>%
+merged_raw_tbl <- shet_tbl %>%
   inner_join(tpm_metrics_tbl, by = "Gene") %>%
   inner_join(h2_tmm_raw_tbl, by = "Gene") %>%
-  inner_join(h2_tmm_irnt_tbl, by = "Gene")
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
 
-if (nrow(merged_tbl) == 0L) {
-  stop("No overlapping genes after merging Shet, mean/median TPM, TMM h2 RAW, and TMM h2 IRNT.")
+merged_irnt_tbl <- shet_tbl %>%
+  inner_join(tpm_metrics_tbl, by = "Gene") %>%
+  inner_join(h2_tmm_irnt_tbl, by = "Gene") %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
+merged_pair_tbl <- merged_raw_tbl %>%
+  inner_join(
+    merged_irnt_tbl %>% select(Gene, h2_tmm_irnt),
+    by = "Gene"
+  ) %>%
+  mutate(post_mean_bin_merged = ntile(post_mean, n_deciles))
+
+gene_count_audit <- tibble(
+  set = c(
+    "shet_tbl",
+    "tpm_metrics_tbl",
+    "h2_tmm_raw_tbl",
+    "h2_tmm_irnt_tbl",
+    "merged_raw_tbl",
+    "merged_irnt_tbl",
+    "merged_pair_tbl"
+  ),
+  n_genes = c(
+    nrow(shet_tbl),
+    nrow(tpm_metrics_tbl),
+    nrow(h2_tmm_raw_tbl),
+    nrow(h2_tmm_irnt_tbl),
+    nrow(merged_raw_tbl),
+    nrow(merged_irnt_tbl),
+    nrow(merged_pair_tbl)
+  )
+)
+fwrite(as.data.table(gene_count_audit), file.path(analysis_root, "gene_count_audit.tsv"), sep = "\t")
+
+if (nrow(merged_raw_tbl) == 0L) {
+  stop("No overlapping genes after merging Shet + TPM + TMM RAW h2.")
 }
 
-run_plot_suite(
-  df = merged_tbl,
-  suite_name = "all_genes",
-  suite_subtitle = "All PASS genes with Shet+TPM+h2 overlap"
+if (nrow(merged_irnt_tbl) == 0L) {
+  stop("No overlapping genes after merging Shet + TPM + TMM IRNT h2.")
+}
+
+run_plot_suite_single(
+  df = merged_raw_tbl,
+  h2_col = "h2_tmm_raw",
+  h2_label = "RAW",
+  suite_name = "raw_only_all_genes",
+  suite_subtitle = "All PASS genes with Shet+TPM+TMM RAW h2 overlap"
 )
 
-run_decile_sensitivity(
-  df = merged_tbl,
-  suite_name = "all_genes",
-  suite_subtitle = "All PASS genes with Shet+TPM+h2 overlap",
+run_decile_sensitivity_single(
+  df = merged_raw_tbl,
+  h2_col = "h2_tmm_raw",
+  h2_label = "RAW",
+  suite_name = "raw_only_all_genes",
+  suite_subtitle = "All PASS genes with Shet+TPM+TMM RAW h2 overlap",
   shet_reference_tbl = shet_tbl,
   shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
 )
 
-filtered_tbl <- merged_tbl %>%
-  filter(h2_tmm_raw > h2_low_cutoff, h2_tmm_irnt > h2_low_cutoff)
+run_plot_suite_single(
+  df = merged_irnt_tbl,
+  h2_col = "h2_tmm_irnt",
+  h2_label = "IRNT",
+  suite_name = "irnt_only_all_genes",
+  suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap"
+)
 
-if (nrow(filtered_tbl) < 100L) {
-  message(
-    "Low-h2 filtered set is small (n=", nrow(filtered_tbl), "). ",
-    "Still writing outputs, but interpret trends with caution."
+run_decile_sensitivity_single(
+  df = merged_irnt_tbl,
+  h2_col = "h2_tmm_irnt",
+  h2_label = "IRNT",
+  suite_name = "irnt_only_all_genes",
+  suite_subtitle = "All PASS genes with Shet+TPM+TMM IRNT h2 overlap",
+  shet_reference_tbl = shet_tbl,
+  shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
+)
+
+if (nrow(merged_pair_tbl) > 0L) {
+  run_plot_suite_pair(
+    df = merged_pair_tbl,
+    suite_name = "raw_irnt_overlap_all_genes",
+    suite_subtitle = "Genes with Shet+TPM+both TMM RAW/IRNT h2 overlap"
   )
-}
 
-if (nrow(filtered_tbl) >= 10L) {
-  filtered_suite_name <- paste0("h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE)))
-
-  run_plot_suite(
-    df = filtered_tbl,
-    suite_name = filtered_suite_name,
-    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff, " and h2 TMM IRNT > ", h2_low_cutoff)
-  )
-
-  run_decile_sensitivity(
-    df = filtered_tbl,
-    suite_name = filtered_suite_name,
-    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff, " and h2 TMM IRNT > ", h2_low_cutoff),
+  run_decile_sensitivity_pair(
+    df = merged_pair_tbl,
+    suite_name = "raw_irnt_overlap_all_genes",
+    suite_subtitle = "Genes with Shet+TPM+both TMM RAW/IRNT h2 overlap",
     shet_reference_tbl = shet_tbl,
     shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
   )
 } else {
-  message(
-    "Skipping low-h2 filtered suite: too few genes after filtering (n=",
-    nrow(filtered_tbl),
-    ")."
-  )
+  message("Skipping overlap RAW-vs-IRNT suite: no genes shared between RAW and IRNT merges.")
 }
+
+filtered_raw_tbl <- merged_raw_tbl %>%
+  filter(h2_tmm_raw > h2_low_cutoff)
+
+filtered_irnt_tbl <- merged_irnt_tbl %>%
+  filter(h2_tmm_irnt > h2_low_cutoff)
+
+filtered_pair_tbl <- merged_pair_tbl %>%
+  filter(h2_tmm_raw > h2_low_cutoff, h2_tmm_irnt > h2_low_cutoff)
+
+if (nrow(filtered_raw_tbl) >= 10L) {
+  run_plot_suite_single(
+    df = filtered_raw_tbl,
+    h2_col = "h2_tmm_raw",
+    h2_label = "RAW",
+    suite_name = paste0("raw_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff)
+  )
+  run_decile_sensitivity_single(
+    df = filtered_raw_tbl,
+    h2_col = "h2_tmm_raw",
+    h2_label = "RAW",
+    suite_name = paste0("raw_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff),
+    shet_reference_tbl = shet_tbl,
+    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
+  )
+} else message("Skipping RAW-only low-h2-filtered suite: too few genes (n=", nrow(filtered_raw_tbl), ").")
+
+if (nrow(filtered_irnt_tbl) >= 10L) {
+  run_plot_suite_single(
+    df = filtered_irnt_tbl,
+    h2_col = "h2_tmm_irnt",
+    h2_label = "IRNT",
+    suite_name = paste0("irnt_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with h2 TMM IRNT > ", h2_low_cutoff)
+  )
+  run_decile_sensitivity_single(
+    df = filtered_irnt_tbl,
+    h2_col = "h2_tmm_irnt",
+    h2_label = "IRNT",
+    suite_name = paste0("irnt_only_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE))),
+    suite_subtitle = paste0("Genes with h2 TMM IRNT > ", h2_low_cutoff),
+    shet_reference_tbl = shet_tbl,
+    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
+  )
+} else message("Skipping IRNT-only low-h2-filtered suite: too few genes (n=", nrow(filtered_irnt_tbl), ").")
+
+if (nrow(filtered_pair_tbl) >= 10L) {
+  overlap_filtered_suite <- paste0("raw_irnt_overlap_h2_filtered_gt_", gsub("\\.", "p", format(h2_low_cutoff, scientific = FALSE)))
+  run_plot_suite_pair(
+    df = filtered_pair_tbl,
+    suite_name = overlap_filtered_suite,
+    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff, " and h2 TMM IRNT > ", h2_low_cutoff)
+  )
+  run_decile_sensitivity_pair(
+    df = filtered_pair_tbl,
+    suite_name = overlap_filtered_suite,
+    suite_subtitle = paste0("Genes with h2 TMM RAW > ", h2_low_cutoff, " and h2 TMM IRNT > ", h2_low_cutoff),
+    shet_reference_tbl = shet_tbl,
+    shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
+  )
+} else message("Skipping RAW-IRNT overlap low-h2-filtered suite: too few genes (n=", nrow(filtered_pair_tbl), ").")
