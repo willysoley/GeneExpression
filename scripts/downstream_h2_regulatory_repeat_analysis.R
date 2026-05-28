@@ -1,3 +1,7 @@
+# Purpose:
+# - Helper or downstream analysis script for the GEUVADIS v2 GeneExpression workflow.
+# - Used for phenotype preparation, result summarization, or plotting; see the filename and `nf/main.nf` for context.
+
 #!/usr/bin/env Rscript
 
 suppressPackageStartupMessages({

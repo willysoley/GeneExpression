@@ -1,4 +1,9 @@
 #!/usr/bin/env bash
+
+# Purpose:
+# - Helper shell script for the GEUVADIS v2 GeneExpression workflow (packaging, cleanup, or convenience).
+# - See the surrounding directory and filenames for expected inputs/outputs.
+
 set -euo pipefail
 
 usage() {

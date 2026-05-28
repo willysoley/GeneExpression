@@ -519,4 +519,8 @@ else
   fi
 fi
 
+# Purpose:
+# - Slurm driver that runs the GEUVADIS GREML Nextflow workflow (`nf/main.nf`) with the configured profile.
+# - Sets up run directories and isolates runs by parameter combination for reproducibility.
+
 "${NEXTFLOW_CMD[@]}" "$@"

@@ -3,6 +3,16 @@ import java.time.Instant
 
 nextflow.enable.dsl = 2
 
+// Purpose:
+// - Nextflow workflow for GEUVADIS expression heritability (GCTA GREML) runs (v2), including
+//   phenotype preparation, QC (PCA/GRM), and per-gene heritability estimation across multiple
+//   expression/normalization configurations.
+//
+// Design notes:
+// - Uses content hashing (SHA-256) and marker checks to ensure the phenotype-prep script includes
+//   required diagnostic steps (e.g., GTEx-style filters, TMM normalization) before running large jobs.
+// - Intended to support reproducible comparison across "tracks" (different SNP sets, expression sources, etc.).
+
 def mustExist = { label, p ->
     if (!p) {
         error "Missing required parameter: ${label}"
