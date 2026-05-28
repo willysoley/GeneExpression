@@ -1,6 +1,6 @@
 # GEUVADIS Gene Expression GREML Workflow Handoff
 
-Last updated: 2026-05-26
+Last updated: 2026-05-28
 
 This document is a knowledge-transfer guide for the GEUVADIS gene expression
 heritability workflow in this repository. It is written for the next person who
@@ -137,6 +137,30 @@ awk -F'\t' 'NR>1{n[$2]++} END{for (k in n) print k, n[k]}' \
 13. Save the run name, summary files, phenotype files, qcovar files, GRM/PCA
 files, Nextflow logs, GCTA version, and any plotting outputs used in the lab
 meeting or manuscript.
+
+## 0B. Toy Example For Smoke Testing
+
+If you want to test the workflow without launching the full GEUVADIS run set,
+use the toy example in `toy_example/`. It reuses the small SDRF and PLINK
+fixture from `GeneExpression/20260106_0_test_GREML` and generates tiny local
+TPM/count matrices that still exercise the full phenotype-prep and GREML path.
+
+Run it in order from the repository root:
+
+```bash
+cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
+bash toy_example/numbered_scripts/0_make_smoke_test_inputs.sh
+bash toy_example/numbered_scripts/1_run_smoke_test_greml.sh
+bash toy_example/numbered_scripts/2_check_smoke_test_outputs.sh
+```
+
+What the toy example checks:
+
+- synthetic expression maps onto the existing European sample set,
+- phenotype preparation writes the expected `.phenotypes.tsv`, `.qcovar`, and
+  `.gene_index_map.txt` files,
+- the GREML summary stage completes, and
+- the final summary contains PASS entries for the toy genes.
 
 ## 0A. Quick FAQ
 
