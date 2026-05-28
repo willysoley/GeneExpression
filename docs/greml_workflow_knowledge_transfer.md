@@ -141,18 +141,27 @@ meeting or manuscript.
 ## 0B. Toy Example For Smoke Testing
 
 If you want to test the workflow without launching the full GEUVADIS run set,
-use the toy example in `toy_example/`. It reuses the small SDRF and PLINK
-fixture from `GeneExpression/20260106_0_test_GREML` and generates tiny local
-TPM/count matrices that still exercise the full phenotype-prep and GREML path.
+use the toy example in `toy_example/`. The toy inputs are already committed, so
+the user does not need to run helper scripts just to launch the smoke test.
 
-Run it in order from the repository root:
+What the user should do:
+
+1. Open `toy_example/toy_smoke_test.config` and change paths or parameters only
+   if the local environment needs different values.
+2. Run the wrapper script:
 
 ```bash
-cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
-bash toy_example/numbered_scripts/0_make_smoke_test_inputs.sh
-bash toy_example/numbered_scripts/1_run_smoke_test_greml.sh
-bash toy_example/numbered_scripts/2_check_smoke_test_outputs.sh
+bash toy_example/run_toy_example.sh
 ```
+
+What the wrapper does:
+
+- submits `run_greml.sh` with the toy config,
+- disables fanout so only one run is launched,
+- keeps the launch directory at the repository root so the toy outputs land in
+  `toy_example/`, and
+- requests enough Slurm resources for the local Nextflow executor used by the
+  smoke test.
 
 What the toy example checks:
 

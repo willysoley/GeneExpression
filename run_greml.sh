@@ -486,6 +486,12 @@ fi
 
 cd "${RUN_DIR}"
 
+NEXTFLOW_CONFIG="${GREML_NEXTFLOW_CONFIG:-${NF_DIR}/nextflow.config}"
+if [[ ! -f "${NEXTFLOW_CONFIG}" ]]; then
+  echo "ERROR: Missing Nextflow config file: ${NEXTFLOW_CONFIG}" >&2
+  exit 2
+fi
+
 echo "Launching GREML workflow"
 echo "Submit dir  : ${SLURM_SUBMIT_DIR:-<unset>}"
 echo "Project dir : ${PROJECT_DIR}"
@@ -496,12 +502,12 @@ echo "Combo hash  : ${combo_hash_short}"
 echo "Isolation   : $([[ "${ISOLATE_BY_COMBO}" == "1" ]] && echo "enabled" || echo "disabled")"
 echo "Run dir     : ${RUN_DIR}"
 echo "Work dir    : ${NXF_WORK}"
-echo "Config file : ${NF_DIR}/nextflow.config"
+echo "Config file : ${NEXTFLOW_CONFIG}"
 echo "Launch lock : ${LOCK_IMPL} (wait=${LOCK_WAIT_SEC}s)"
 
 NEXTFLOW_CMD=(
   nextflow -log "${NXF_LOG_FILE}" run "${NF_DIR}/main.nf"
-  -c "${NF_DIR}/nextflow.config"
+  -c "${NEXTFLOW_CONFIG}"
   -profile slurm
   -w "${NXF_WORK}"
 )

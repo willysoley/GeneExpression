@@ -8,21 +8,28 @@ It reuses the existing small genotype/SDRF fixture under
 and generates a tiny local TPM/count matrix so the pipeline can be exercised
 without the full production expression matrices.
 
-Files:
+The toy example is launched through the single wrapper script
+`toy_example/run_toy_example.sh`.
 
-- `numbered_scripts/0_make_smoke_test_inputs.sh` creates the synthetic TPM and count matrices under `smoke_test_data/`.
-- `numbered_scripts/1_run_smoke_test_greml.sh` runs the Nextflow workflow locally against the toy inputs.
-- `numbered_scripts/2_check_smoke_test_outputs.sh` checks the phenotype, covariate, and summary outputs.
-- `toy_smoke_test.config` overrides the production paths and lowers PEER to a tiny value for this smoke test.
-
-Run the toy example in order:
+If you need to change paths or parameters for a local smoke test, edit
+`toy_smoke_test.config` first. Then run:
 
 ```bash
-cd /gpfs/data/mostafavilab/sool/analysis/GeneExpression/20260428_GE_GEUVADIS_v2/GeneExpression
-bash toy_example/numbered_scripts/0_make_smoke_test_inputs.sh
-bash toy_example/numbered_scripts/1_run_smoke_test_greml.sh
-bash toy_example/numbered_scripts/2_check_smoke_test_outputs.sh
+bash toy_example/run_toy_example.sh
 ```
+
+The wrapper submits the regular `run_greml.sh` driver with the toy config and
+the Slurm resources needed for the small local smoke test.
+
+The toy data under `toy_example/smoke_test_data/` are already committed, so the
+user does not need to run the helper scripts unless they want to regenerate or
+debug the toy inputs.
+
+Files:
+
+- `toy_smoke_test.config` overrides the production paths and lowers PEER to a tiny value for this smoke test.
+- `run_toy_example.sh` is the one-command launch wrapper.
+- `numbered_scripts/` contains the input-generator and checker helpers used during development.
 
 The smoke test is intentionally small. It checks that the workflow can:
 
