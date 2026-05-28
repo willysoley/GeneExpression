@@ -172,3 +172,17 @@ Rscript scripts/downstream_h2_regulatory_repeat_analysis.R
 - Current expression filtering implements the TPM component of GTEx-style filtering.  
   (GTEx eQTL prep also uses a read-count threshold when counts are available.)
 - Windows are gene-centered for primary burden analyses; TSS-centered features are also exported for comparison.
+
+## Toy Example
+
+A small smoke test lives in `toy_example/`. It reuses the existing small
+GEUVADIS genotype/SDRF fixture and generates a tiny TPM/count pair so you can
+exercise the latest GREML workflow locally.
+
+Run it with:
+
+```bash
+bash toy_example/numbered_scripts/0_make_smoke_test_inputs.sh
+bash toy_example/numbered_scripts/1_run_smoke_test_greml.sh
+bash toy_example/numbered_scripts/2_check_smoke_test_outputs.sh
+```

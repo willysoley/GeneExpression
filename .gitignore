@@ -1,0 +1,6 @@
+.nextflow/
+.nextflow.log*
+nextflow_logs/
+runs/
+toy_example/results/
+toy_example/work/
