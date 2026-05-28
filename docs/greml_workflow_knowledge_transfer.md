@@ -142,7 +142,7 @@ meeting or manuscript.
 
 If you want to test the workflow without launching the full GEUVADIS run set,
 use the toy example in `toy_example/`. The toy inputs are already committed, so
-the user does not need to run helper scripts just to launch the smoke test.
+the user only needs the wrapper script to launch the smoke test.
 
 What the user should do:
 

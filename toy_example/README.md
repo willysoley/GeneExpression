@@ -22,14 +22,12 @@ The wrapper submits the regular `run_greml.sh` driver with the toy config and
 the Slurm resources needed for the small local smoke test.
 
 The toy data under `toy_example/smoke_test_data/` are already committed, so the
-user does not need to run the helper scripts unless they want to regenerate or
-debug the toy inputs.
+user only needs the wrapper unless they want to inspect the inputs manually.
 
 Files:
 
 - `toy_smoke_test.config` overrides the production paths and lowers PEER to a tiny value for this smoke test.
 - `run_toy_example.sh` is the one-command launch wrapper.
-- `numbered_scripts/` contains the input-generator and checker helpers used during development.
 
 The smoke test is intentionally small. It checks that the workflow can:
 
