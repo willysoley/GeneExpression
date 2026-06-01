@@ -401,7 +401,7 @@ run_plot_suite_pair <- function(df, suite_name, suite_subtitle) {
     labs(
       title = "TPM by s_het decile",
       subtitle = suite_subtitle,
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "TPM",
       color = "TPM summary"
     ) +
@@ -450,7 +450,7 @@ run_plot_suite_pair <- function(df, suite_name, suite_subtitle) {
     labs(
       title = paste0("Correlation(TMM h2 RAW, TMM h2 ", norm2_short, ") by TPM decile"),
       subtitle = paste0(suite_subtitle, " | correlation method: ", toupper(cor_method), " | h2 source: TMM"),
-      x = "TPM decile (1-10)",
+      x = "TPM decile (1-10; 10 = highest expression)",
       y = paste0("Correlation(TMM h2 RAW, TMM h2 ", norm2_short, ")"),
       color = "Decile definition"
     ) +
@@ -747,7 +747,7 @@ run_plot_suite_single <- function(df, h2_col, h2_label, suite_name, suite_subtit
     labs(
       title = "TPM by s_het decile",
       subtitle = paste0(suite_subtitle, " | h2 branch: ", h2_label),
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "TPM",
       color = "TPM summary"
     ) +
@@ -891,7 +891,7 @@ run_h2_source_comparison <- function(df, h2_tmm_col, h2_tpm_col, norm_label, sui
     labs(
       title = paste0("h2 source comparison by s_het decile (", norm_label, ")"),
       subtitle = suite_subtitle,
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML",
       color = "Expression source",
       linetype = "Summary"
@@ -953,7 +953,7 @@ run_shet_h2_triplet <- function(
     labs(
       title = paste0("s_het decile vs h2 (TMM ", toupper(norm_label), ")"),
       subtitle = "Deciles recalculated after TMM merge",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML"
     ) +
     theme_minimal(base_size = 11) +
@@ -973,7 +973,7 @@ run_shet_h2_triplet <- function(
     labs(
       title = paste0("s_het decile vs h2 (TPM ", toupper(norm_label), ")"),
       subtitle = "Deciles recalculated after TPM merge",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML"
     ) +
     theme_minimal(base_size = 11) +
@@ -996,7 +996,7 @@ run_shet_h2_triplet <- function(
     labs(
       title = paste0("s_het decile vs h2 (overlap TPM+TMM ", toupper(norm_label), ")"),
       subtitle = "Deciles recalculated on overlapping genes only",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML",
       color = "h2 source"
     ) +
@@ -1063,8 +1063,8 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     geom_boxplot() +
     labs(
       title = paste0("TPM distribution vs s_het decile (", h2_label, " branch)"),
-      subtitle = "Vanilla boxplot; top 1% of mean TPM trimmed for visualization. Mean/median values in plotA_tpm_distribution_summary_values.tsv",
-      x = "s_het post_mean decile (1-10)",
+      subtitle = "Top 1% TPM trimmed for visibility; decile 10 = highest s_het.",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "Mean TPM"
     ) +
     theme_minimal(base_size = 11) +
@@ -1087,7 +1087,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     geom_point(size = 1.8) +
     labs(
       title = paste0("TPM skewness vs s_het decile (", h2_label, " branch)"),
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "Skewness",
       color = "Metric"
     ) +
@@ -1105,7 +1105,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     labs(
       title = paste0("Fraction near-zero h2 vs s_het decile (", h2_label, " branch)"),
       subtitle = "Near-zero defined with epsilon = min(h2_GREML) in PASS table",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "Fraction near-zero h2 genes"
     ) +
     theme_minimal(base_size = 11) +
@@ -1122,7 +1122,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     labs(
       title = paste0("Fraction near-zero h2 vs TPM decile (", h2_label, " branch)"),
       subtitle = "Near-zero defined with epsilon = min(h2_GREML) in PASS table",
-      x = "TPM decile (1-10)",
+      x = "TPM decile (1-10; 10 = highest expression)",
       y = "Fraction near-zero h2 genes"
     ) +
     theme_minimal(base_size = 11) +
@@ -1154,7 +1154,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     labs(
       title = paste0("h2 distribution vs s_het decile (all expressed genes, ", h2_label, ")"),
       subtitle = "Boxplot with mean/median markers and numeric labels",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML"
     ) +
     theme_minimal(base_size = 11) +
@@ -1187,7 +1187,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
       labs(
         title = paste0("h2 distribution vs s_het decile (excluding near-zero, ", h2_label, ")"),
         subtitle = "Boxplot with mean/median markers and numeric labels",
-        x = "s_het post_mean decile (1-10)",
+        x = "s_het post_mean decile (1-10; 10 = highest s_het)",
         y = "h2_GREML"
       ) +
       theme_minimal(base_size = 11) +
@@ -1220,7 +1220,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
     labs(
       title = paste0("h2 distribution vs TPM decile (all expressed genes, ", h2_label, ")"),
       subtitle = "Boxplot with mean/median markers and numeric labels",
-      x = "TPM decile (1-10)",
+      x = "TPM decile (1-10; 10 = highest expression)",
       y = "h2_GREML"
     ) +
     theme_minimal(base_size = 11) +
@@ -1253,7 +1253,7 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
       labs(
         title = paste0("h2 distribution vs TPM decile (excluding near-zero, ", h2_label, ")"),
         subtitle = "Boxplot with mean/median markers and numeric labels",
-        x = "TPM decile (1-10)",
+        x = "TPM decile (1-10; 10 = highest expression)",
         y = "h2_GREML"
       ) +
       theme_minimal(base_size = 11) +
@@ -1349,8 +1349,8 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     ) +
     labs(
       title = "TPM distribution vs s_het decile",
-      subtitle = "Vanilla boxplot; top 1% of TPM trimmed for visualization. Mean/median values shown and saved in plotA_tpm_distribution_summary_values.tsv",
-      x = "s_het post_mean decile (1-10)",
+      subtitle = "Top 1% TPM trimmed for visibility; decile 10 = highest s_het.",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "TPM"
     ) +
     clean_theme
@@ -1372,7 +1372,7 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     geom_point(size = 1.8) +
     labs(
       title = "TPM skewness vs s_het decile",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "Skewness",
       color = "Metric"
     ) +
@@ -1416,7 +1416,7 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     labs(
       title = "Fraction genes with near-zero h2 vs s_het decile",
       subtitle = "Near-zero defined as h2 < threshold",
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "Fraction near-zero h2 genes",
       color = "TMM h2 type"
     ) +
@@ -1434,7 +1434,7 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     labs(
       title = "Fraction genes with near-zero h2 vs TPM decile",
       subtitle = "Near-zero defined as h2 < threshold",
-      x = "TPM decile (1-10)",
+      x = "TPM decile (1-10; 10 = highest expression)",
       y = "Fraction near-zero h2 genes",
       color = "TMM h2 type"
     ) +
@@ -1453,7 +1453,8 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
       inherit.aes = FALSE,
       color = "firebrick",
       size = 2.5,
-      vjust = -0.6
+      vjust = -0.6,
+      position = position_nudge(x = -0.18)
     ) +
     geom_text(
       data = h2_shet_all_stats,
@@ -1461,13 +1462,14 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
       inherit.aes = FALSE,
       color = "darkgreen",
       size = 2.5,
-      vjust = 1.2
+      vjust = 1.2,
+      position = position_nudge(x = 0.18)
     ) +
     facet_wrap(~h2_type, scales = "free_y") +
     labs(
       title = "h2 distribution vs s_het decile (all expressed genes)",
       subtitle = paste0("TMM h2 shown for RAW and ", norm2_short, "; mean/median in plotE_h2_vs_shet_decile_all_summary_values.tsv"),
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML"
     ) +
     clean_theme
@@ -1485,7 +1487,8 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
       inherit.aes = FALSE,
       color = "firebrick",
       size = 2.4,
-      vjust = -0.6
+      vjust = -0.6,
+      position = position_nudge(x = -0.18)
     ) +
     geom_text(
       data = h2_shet_ex_stats,
@@ -1493,13 +1496,14 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
       inherit.aes = FALSE,
       color = "darkgreen",
       size = 2.4,
-      vjust = 1.2
+      vjust = 1.2,
+      position = position_nudge(x = 0.18)
     ) +
     facet_grid(cutoff_label ~ h2_type, scales = "free_y") +
     labs(
       title = "h2 distribution vs s_het decile (excluding near-zero genes)",
       subtitle = paste0("Near-zero defined as h2 < threshold; TMM h2 shown for RAW and ", norm2_short, "; mean/median shown and saved in plotF_h2_vs_shet_decile_excluding_near_zero_summary_values.tsv"),
-      x = "s_het post_mean decile (1-10)",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
       y = "h2_GREML"
     ) +
     clean_theme
@@ -1531,7 +1535,7 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     labs(
       title = "h2 distribution vs TPM decile (all expressed genes)",
       subtitle = paste0("TMM h2 shown for RAW and ", norm2_short, "; mean/median in plotG_h2_vs_tpm_decile_all_summary_values.tsv"),
-      x = "TPM decile (1-10)",
+      x = "TPM decile (1-10; 10 = highest expression)",
       y = "h2_GREML"
     ) +
     clean_theme
@@ -1563,7 +1567,7 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     labs(
       title = "h2 distribution vs TPM decile (excluding near-zero genes)",
       subtitle = paste0("Near-zero defined as h2 < threshold; TMM h2 shown for RAW and ", norm2_short, "; mean/median shown and saved in plotH_h2_vs_tpm_decile_excluding_near_zero_summary_values.tsv"),
-      x = "TPM decile (1-10)",
+      x = "TPM decile (1-10; 10 = highest expression)",
       y = "h2_GREML"
     ) +
     clean_theme
