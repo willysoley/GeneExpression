@@ -1444,26 +1444,25 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
   h2_shet_all_stats <- h2_long_all %>%
     group_by(shet_decile, h2_type) %>%
     summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
+  h2_shet_all_label_tbl <- h2_shet_all_stats %>%
+    mutate(
+      label = sprintf("mn=%.3f\nmd=%.3f", mean_value, median_value),
+      y_pos = Inf
+    )
 
   p_h2_shet_all <- ggplot(h2_long_all, aes(x = factor(shet_decile), y = h2)) +
     geom_boxplot() +
-    geom_text(
-      data = h2_shet_all_stats,
-      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+    geom_label(
+      data = h2_shet_all_label_tbl,
+      aes(x = factor(shet_decile), y = y_pos, label = label),
       inherit.aes = FALSE,
-      color = "firebrick",
-      size = 2.5,
-      vjust = -0.6,
-      position = position_nudge(x = -0.18)
-    ) +
-    geom_text(
-      data = h2_shet_all_stats,
-      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
-      inherit.aes = FALSE,
-      color = "darkgreen",
-      size = 2.5,
-      vjust = 1.2,
-      position = position_nudge(x = 0.18)
+      fill = "white",
+      color = "black",
+      alpha = 0.85,
+      size = 2.0,
+      lineheight = 0.8,
+      label.size = 0.15,
+      vjust = 1.02
     ) +
     facet_wrap(~h2_type, scales = "free_y") +
     labs(
@@ -1478,26 +1477,25 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
   h2_shet_ex_stats <- h2_long_ex_cutoff %>%
     group_by(cutoff_label, cutoff, shet_decile, h2_type) %>%
     summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
+  h2_shet_ex_label_tbl <- h2_shet_ex_stats %>%
+    mutate(
+      label = sprintf("mn=%.3f\nmd=%.3f", mean_value, median_value),
+      y_pos = Inf
+    )
 
   p_h2_shet_ex <- ggplot(h2_long_ex_cutoff, aes(x = factor(shet_decile), y = h2)) +
     geom_boxplot() +
-    geom_text(
-      data = h2_shet_ex_stats,
-      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+    geom_label(
+      data = h2_shet_ex_label_tbl,
+      aes(x = factor(shet_decile), y = y_pos, label = label),
       inherit.aes = FALSE,
-      color = "firebrick",
-      size = 2.4,
-      vjust = -0.6,
-      position = position_nudge(x = -0.18)
-    ) +
-    geom_text(
-      data = h2_shet_ex_stats,
-      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
-      inherit.aes = FALSE,
-      color = "darkgreen",
-      size = 2.4,
-      vjust = 1.2,
-      position = position_nudge(x = 0.18)
+      fill = "white",
+      color = "black",
+      alpha = 0.85,
+      size = 1.8,
+      lineheight = 0.8,
+      label.size = 0.15,
+      vjust = 1.02
     ) +
     facet_grid(cutoff_label ~ h2_type, scales = "free_y") +
     labs(
