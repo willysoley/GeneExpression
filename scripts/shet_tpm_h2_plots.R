@@ -274,6 +274,47 @@ read_tpm_metrics_by_gene <- function(run_dir) {
     )
 }
 
+read_tpm_values_by_gene <- function(run_dir) {
+  data_dir <- file.path(run_dir, "results", "data")
+  pheno_file <- list.files(data_dir, pattern = "^pheno_.*\\.phenotypes\\.tsv$", full.names = TRUE) %>% .[[1]]
+  map_file <- list.files(data_dir, pattern = "^pheno_.*\\.gene_index_map\\.txt$", full.names = TRUE) %>% .[[1]]
+
+  pheno <- fread(pheno_file, header = FALSE, sep = "\t", data.table = TRUE)
+  map_dt <- fread(map_file, sep = "\t", data.table = TRUE)
+
+  if (!all(c("gene_name", "mpheno_index") %in% names(map_dt))) {
+    stop("Unexpected gene_index_map format in: ", map_file)
+  }
+
+  map_dt <- map_dt[order(as.integer(mpheno_index))]
+  genes <- normalize_gene_id(map_dt$gene_name)
+  expr <- as.matrix(pheno[, -(1:2), with = FALSE])
+  storage.mode(expr) <- "numeric"
+
+  if ((ncol(pheno) - 2L) != length(genes)) {
+    stop("Phenotype/map dimension mismatch in: ", run_dir)
+  }
+
+  if (anyDuplicated(genes) > 0L) {
+    idx <- split(seq_along(genes), genes)
+    expr <- do.call(
+      cbind,
+      lapply(idx, function(ii) {
+        if (length(ii) == 1L) expr[, ii] else rowMeans(expr[, ii, drop = FALSE], na.rm = TRUE)
+      })
+    )
+    genes <- names(idx)
+  } else {
+    colnames(expr) <- genes
+  }
+
+  tibble(
+    Gene = rep(normalize_gene_id(colnames(expr)), each = nrow(expr)),
+    tpm = as.numeric(expr)
+  ) %>%
+    filter(is.finite(tpm))
+}
+
 plot_h2_shet <- function(df, out_file) {
   h2_long <- df %>%
     select(post_mean, post_mean_bin, h2_tmm_raw, h2_tmm_irnt) %>%
@@ -1236,18 +1277,13 @@ run_additional_decile_analyses <- function(df_all, df_ex, h2_col, near_zero_col,
   }
 }
 
-run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_name) {
+run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_name, tpm_run_dir) {
   suite_root <- file.path(analysis_root, "comment_requested_diagnostics", suite_name)
   plots_dir <- file.path(suite_root, "plots")
   tables_dir <- file.path(suite_root, "tables")
   dir.create(plots_dir, recursive = TRUE, showWarnings = FALSE)
   dir.create(tables_dir, recursive = TRUE, showWarnings = FALSE)
-  clean_theme <- theme_classic(base_size = 12) +
-    theme(
-      panel.grid = element_blank(),
-      strip.background = element_rect(fill = "grey95", color = NA),
-      strip.text = element_text(face = "bold")
-    )
+  clean_theme <- theme_gray(base_size = 12)
 
   all_base <- df_all_pair %>%
     mutate(
@@ -1263,30 +1299,59 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
 
   if (nrow(all_base) == 0L) return(invisible(NULL))
 
-  tpm_box_stats <- all_base %>%
+  tpm_gene_decile_tbl <- all_base %>%
+    select(Gene, shet_decile) %>%
+    distinct()
+
+  tpm_values_tbl <- read_tpm_values_by_gene(tpm_run_dir)
+  tpm_all_tbl <- tpm_gene_decile_tbl %>%
+    inner_join(tpm_values_tbl, by = "Gene") %>%
+    filter(is.finite(tpm))
+
+  if (nrow(tpm_all_tbl) == 0L) {
+    stop("No TPM observations overlap with merged Shet/h2 genes for plot A.")
+  }
+
+  tpm_box_stats <- tpm_all_tbl %>%
     group_by(shet_decile) %>%
     summarise(
-      n_genes = n(),
-      mean_value = mean(mean_tpm, na.rm = TRUE),
-      median_value = median(mean_tpm, na.rm = TRUE),
+      n_values = n(),
+      mean_value = mean(tpm, na.rm = TRUE),
+      median_value = median(tpm, na.rm = TRUE),
       .groups = "drop"
     )
 
   # For visualization only: trim extreme upper tail so box structure is visible.
-  tpm_upper_99 <- quantile(all_base$mean_tpm, probs = 0.99, na.rm = TRUE)
-  tpm_plot_tbl <- all_base %>% filter(mean_tpm <= tpm_upper_99)
+  tpm_upper_99 <- quantile(tpm_all_tbl$tpm, probs = 0.99, na.rm = TRUE)
+  tpm_plot_tbl <- tpm_all_tbl %>% filter(tpm <= tpm_upper_99)
   tpm_plot_limits <- tibble(
-    tpm_metric = "Mean TPM",
+    tpm_metric = "TPM",
     upper_99 = as.numeric(tpm_upper_99)
   )
 
-  p_tpm_dist <- ggplot(tpm_plot_tbl, aes(x = factor(shet_decile), y = mean_tpm)) +
+  p_tpm_dist <- ggplot(tpm_plot_tbl, aes(x = factor(shet_decile), y = tpm)) +
     geom_boxplot() +
+    geom_text(
+      data = tpm_box_stats,
+      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "firebrick",
+      size = 2.6,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = tpm_box_stats,
+      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "darkgreen",
+      size = 2.6,
+      vjust = 1.2
+    ) +
     labs(
       title = "TPM distribution vs s_het decile",
-      subtitle = "Vanilla boxplot; top 1% of mean TPM trimmed for visualization. Mean/median values in plotA_tpm_distribution_summary_values.tsv",
+      subtitle = "Vanilla boxplot; top 1% of TPM trimmed for visualization. Mean/median values shown and saved in plotA_tpm_distribution_summary_values.tsv",
       x = "s_het post_mean decile (1-10)",
-      y = "Mean TPM"
+      y = "TPM"
     ) +
     clean_theme
   ggsave(file.path(plots_dir, "plotA_tpm_distribution_vs_shet_decile_box.png"), p_tpm_dist, width = 10, height = 5.5, dpi = 300)
@@ -1328,18 +1393,29 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     ) %>%
     filter(is.finite(h2))
 
-  h2_long_ex <- h2_long_all %>% filter(!is_near_zero)
+  near_zero_cutoffs <- tibble(
+    cutoff = c(0.05, 0.005, 0.0005),
+    cutoff_label = c("< 0.05", "< 0.005", "< 0.0005")
+  )
 
-  frac_near0_shet <- h2_long_all %>%
-    group_by(shet_decile, h2_type) %>%
-    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero, na.rm = TRUE), .groups = "drop")
+  h2_long_cutoff <- h2_long_all %>%
+    select(-is_near_zero) %>%
+    crossing(near_zero_cutoffs) %>%
+    mutate(is_near_zero_cutoff = h2 < cutoff)
+
+  h2_long_ex_cutoff <- h2_long_cutoff %>% filter(!is_near_zero_cutoff)
+
+  frac_near0_shet <- h2_long_cutoff %>%
+    group_by(cutoff_label, cutoff, shet_decile, h2_type) %>%
+    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero_cutoff, na.rm = TRUE), .groups = "drop")
 
   p_frac_shet <- ggplot(frac_near0_shet, aes(x = factor(shet_decile), y = frac_near_zero_h2, color = h2_type, group = h2_type)) +
     geom_line(linewidth = 1) +
     geom_point(size = 2) +
+    facet_wrap(~cutoff_label) +
     labs(
       title = "Fraction genes with near-zero h2 vs s_het decile",
-      subtitle = paste0("Near-zero defined with epsilon = min(h2_GREML) per RAW/", norm2_short, " branch"),
+      subtitle = "Near-zero defined as h2 < threshold",
       x = "s_het post_mean decile (1-10)",
       y = "Fraction near-zero h2 genes",
       color = "TMM h2 type"
@@ -1347,16 +1423,17 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     clean_theme
   ggsave(file.path(plots_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.png"), p_frac_shet, width = 9, height = 5, dpi = 300)
 
-  frac_near0_tpm <- h2_long_all %>%
-    group_by(tpm_decile, h2_type) %>%
-    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero, na.rm = TRUE), .groups = "drop")
+  frac_near0_tpm <- h2_long_cutoff %>%
+    group_by(cutoff_label, cutoff, tpm_decile, h2_type) %>%
+    summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero_cutoff, na.rm = TRUE), .groups = "drop")
 
   p_frac_tpm <- ggplot(frac_near0_tpm, aes(x = factor(tpm_decile), y = frac_near_zero_h2, color = h2_type, group = h2_type)) +
     geom_line(linewidth = 1) +
     geom_point(size = 2) +
+    facet_wrap(~cutoff_label) +
     labs(
       title = "Fraction genes with near-zero h2 vs TPM decile",
-      subtitle = paste0("Near-zero defined with epsilon = min(h2_GREML) per RAW/", norm2_short, " branch"),
+      subtitle = "Near-zero defined as h2 < threshold",
       x = "TPM decile (1-10)",
       y = "Fraction near-zero h2 genes",
       color = "TMM h2 type"
@@ -1370,6 +1447,22 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
 
   p_h2_shet_all <- ggplot(h2_long_all, aes(x = factor(shet_decile), y = h2)) +
     geom_boxplot() +
+    geom_text(
+      data = h2_shet_all_stats,
+      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "firebrick",
+      size = 2.5,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = h2_shet_all_stats,
+      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "darkgreen",
+      size = 2.5,
+      vjust = 1.2
+    ) +
     facet_wrap(~h2_type, scales = "free_y") +
     labs(
       title = "h2 distribution vs s_het decile (all expressed genes)",
@@ -1380,16 +1473,32 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     clean_theme
   ggsave(file.path(plots_dir, "plotE_h2_distribution_vs_shet_decile_all_expressed.png"), p_h2_shet_all, width = 10, height = 5.5, dpi = 300)
 
-  h2_shet_ex_stats <- h2_long_ex %>%
-    group_by(shet_decile, h2_type) %>%
+  h2_shet_ex_stats <- h2_long_ex_cutoff %>%
+    group_by(cutoff_label, cutoff, shet_decile, h2_type) %>%
     summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
 
-  p_h2_shet_ex <- ggplot(h2_long_ex, aes(x = factor(shet_decile), y = h2)) +
+  p_h2_shet_ex <- ggplot(h2_long_ex_cutoff, aes(x = factor(shet_decile), y = h2)) +
     geom_boxplot() +
-    facet_wrap(~h2_type, scales = "free_y") +
+    geom_text(
+      data = h2_shet_ex_stats,
+      aes(x = factor(shet_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "firebrick",
+      size = 2.4,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = h2_shet_ex_stats,
+      aes(x = factor(shet_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "darkgreen",
+      size = 2.4,
+      vjust = 1.2
+    ) +
+    facet_grid(cutoff_label ~ h2_type, scales = "free_y") +
     labs(
       title = "h2 distribution vs s_het decile (excluding near-zero genes)",
-      subtitle = paste0("TMM h2 shown for RAW and ", norm2_short, "; mean/median in plotF_h2_vs_shet_decile_excluding_near_zero_summary_values.tsv"),
+      subtitle = paste0("Near-zero defined as h2 < threshold; TMM h2 shown for RAW and ", norm2_short, "; mean/median shown and saved in plotF_h2_vs_shet_decile_excluding_near_zero_summary_values.tsv"),
       x = "s_het post_mean decile (1-10)",
       y = "h2_GREML"
     ) +
@@ -1402,6 +1511,22 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
 
   p_h2_tpm_all <- ggplot(h2_long_all, aes(x = factor(tpm_decile), y = h2)) +
     geom_boxplot() +
+    geom_text(
+      data = h2_tpm_all_stats,
+      aes(x = factor(tpm_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "firebrick",
+      size = 2.5,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = h2_tpm_all_stats,
+      aes(x = factor(tpm_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "darkgreen",
+      size = 2.5,
+      vjust = 1.2
+    ) +
     facet_wrap(~h2_type, scales = "free_y") +
     labs(
       title = "h2 distribution vs TPM decile (all expressed genes)",
@@ -1412,16 +1537,32 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
     clean_theme
   ggsave(file.path(plots_dir, "plotG_h2_distribution_vs_tpm_decile_all_expressed.png"), p_h2_tpm_all, width = 10, height = 5.5, dpi = 300)
 
-  h2_tpm_ex_stats <- h2_long_ex %>%
-    group_by(tpm_decile, h2_type) %>%
+  h2_tpm_ex_stats <- h2_long_ex_cutoff %>%
+    group_by(cutoff_label, cutoff, tpm_decile, h2_type) %>%
     summarise(mean_value = mean(h2, na.rm = TRUE), median_value = median(h2, na.rm = TRUE), .groups = "drop")
 
-  p_h2_tpm_ex <- ggplot(h2_long_ex, aes(x = factor(tpm_decile), y = h2)) +
+  p_h2_tpm_ex <- ggplot(h2_long_ex_cutoff, aes(x = factor(tpm_decile), y = h2)) +
     geom_boxplot() +
-    facet_wrap(~h2_type, scales = "free_y") +
+    geom_text(
+      data = h2_tpm_ex_stats,
+      aes(x = factor(tpm_decile), y = mean_value, label = sprintf("mean=%.3g", mean_value)),
+      inherit.aes = FALSE,
+      color = "firebrick",
+      size = 2.4,
+      vjust = -0.6
+    ) +
+    geom_text(
+      data = h2_tpm_ex_stats,
+      aes(x = factor(tpm_decile), y = median_value, label = sprintf("median=%.3g", median_value)),
+      inherit.aes = FALSE,
+      color = "darkgreen",
+      size = 2.4,
+      vjust = 1.2
+    ) +
+    facet_grid(cutoff_label ~ h2_type, scales = "free_y") +
     labs(
       title = "h2 distribution vs TPM decile (excluding near-zero genes)",
-      subtitle = paste0("TMM h2 shown for RAW and ", norm2_short, "; mean/median in plotH_h2_vs_tpm_decile_excluding_near_zero_summary_values.tsv"),
+      subtitle = paste0("Near-zero defined as h2 < threshold; TMM h2 shown for RAW and ", norm2_short, "; mean/median shown and saved in plotH_h2_vs_tpm_decile_excluding_near_zero_summary_values.tsv"),
       x = "TPM decile (1-10)",
       y = "h2_GREML"
     ) +
@@ -1441,11 +1582,11 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
   fwrite(as.data.table(tpm_plot_limits), file.path(tables_dir, "plotA_tpm_visual_trim_limits.tsv"), sep = "\t")
 
   summary_values_all <- bind_rows(
-    tpm_box_stats %>% mutate(plot_id = "A_tpm_vs_shet", group_x = shet_decile, subgroup = "Mean TPM") %>% select(plot_id, group_x, subgroup, mean_value, median_value),
+    tpm_box_stats %>% mutate(plot_id = "A_tpm_vs_shet", group_x = shet_decile, subgroup = "TPM") %>% select(plot_id, group_x, subgroup, mean_value, median_value),
     h2_shet_all_stats %>% mutate(plot_id = "E_h2_vs_shet_all", group_x = shet_decile, subgroup = h2_type) %>% select(plot_id, group_x, subgroup, mean_value, median_value),
-    h2_shet_ex_stats %>% mutate(plot_id = "F_h2_vs_shet_excluding_near_zero", group_x = shet_decile, subgroup = h2_type) %>% select(plot_id, group_x, subgroup, mean_value, median_value),
+    h2_shet_ex_stats %>% mutate(plot_id = "F_h2_vs_shet_excluding_near_zero", group_x = shet_decile, subgroup = paste0(h2_type, " | ", cutoff_label)) %>% select(plot_id, group_x, subgroup, mean_value, median_value),
     h2_tpm_all_stats %>% mutate(plot_id = "G_h2_vs_tpm_all", group_x = tpm_decile, subgroup = h2_type) %>% select(plot_id, group_x, subgroup, mean_value, median_value),
-    h2_tpm_ex_stats %>% mutate(plot_id = "H_h2_vs_tpm_excluding_near_zero", group_x = tpm_decile, subgroup = h2_type) %>% select(plot_id, group_x, subgroup, mean_value, median_value)
+    h2_tpm_ex_stats %>% mutate(plot_id = "H_h2_vs_tpm_excluding_near_zero", group_x = tpm_decile, subgroup = paste0(h2_type, " | ", cutoff_label)) %>% select(plot_id, group_x, subgroup, mean_value, median_value)
   ) %>% arrange(plot_id, subgroup, group_x)
   fwrite(as.data.table(summary_values_all), file.path(tables_dir, "all_boxplot_mean_median_values.tsv"), sep = "\t")
 }
@@ -1798,7 +1939,8 @@ if (nrow(merged_pair_all_tbl) > 0L && nrow(merged_pair_tbl) > 0L) {
   run_additional_decile_analyses_pair(
     df_all_pair = merged_pair_all_tbl,
     df_ex_pair = merged_pair_tbl,
-    suite_name = "additional_decile_diagnostics_raw_norm2"
+    suite_name = "additional_decile_diagnostics_raw_norm2",
+    tpm_run_dir = tpm_run_dir
   )
 } else {
   message("Skipping additional decile diagnostics RAW+", norm2_short, ": insufficient overlap.")
