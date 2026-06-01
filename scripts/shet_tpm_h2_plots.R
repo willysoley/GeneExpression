@@ -1437,6 +1437,46 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
 
   h2_long_ex_cutoff <- h2_long_cutoff %>% filter(!is_near_zero_cutoff)
 
+  plotj_tpm_tbl <- h2_long_ex_cutoff %>%
+    select(Gene, shet_decile, h2_type, cutoff, cutoff_label) %>%
+    distinct() %>%
+    inner_join(tpm_values_tbl, by = "Gene") %>%
+    filter(is.finite(tpm))
+
+  plotj_centered_tbl <- plotj_tpm_tbl %>%
+    group_by(cutoff_label, cutoff, h2_type, shet_decile) %>%
+    mutate(
+      bin_mean_tpm = mean(tpm, na.rm = TRUE),
+      tpm_centered = tpm - bin_mean_tpm
+    ) %>%
+    ungroup()
+
+  plotj_skew_tbl <- plotj_centered_tbl %>%
+    group_by(cutoff_label, cutoff, h2_type, shet_decile) %>%
+    summarise(
+      n_genes = n_distinct(Gene),
+      n_values = n(),
+      original_mean_tpm = mean(tpm, na.rm = TRUE),
+      centered_mean_tpm = mean(tpm_centered, na.rm = TRUE),
+      centered_median_tpm = median(tpm_centered, na.rm = TRUE),
+      centered_skewness = skewness_moment(tpm_centered),
+      .groups = "drop"
+    )
+
+  p_plotj_skew <- ggplot(plotj_skew_tbl, aes(x = factor(shet_decile), y = centered_skewness, group = 1)) +
+    geom_hline(yintercept = 0, linetype = "dashed", color = "grey45") +
+    geom_line(linewidth = 1) +
+    geom_point(size = 1.8) +
+    facet_grid(cutoff_label ~ h2_type) +
+    labs(
+      title = "Mean-centered TPM skewness vs s_het decile after h2 filtering",
+      subtitle = "Excludes genes with h2 below each threshold; TPM centered within each decile before skewness.",
+      x = "s_het post_mean decile (1-10; 10 = highest s_het)",
+      y = "Skewness of centered TPM"
+    ) +
+    clean_theme
+  ggsave(file.path(plots_dir, "plotJ_mean_centered_tpm_skewness_excluding_near_zero_h2_vs_shet_decile.png"), p_plotj_skew, width = 10, height = 7, dpi = 300)
+
   frac_near0_shet <- h2_long_cutoff %>%
     group_by(cutoff_label, cutoff, shet_decile, h2_type) %>%
     summarise(n_genes = n(), frac_near_zero_h2 = mean(is_near_zero_cutoff, na.rm = TRUE), .groups = "drop")
@@ -1610,6 +1650,7 @@ run_additional_decile_analyses_pair <- function(df_all_pair, df_ex_pair, suite_n
   fwrite(as.data.table(tpm_box_stats), file.path(tables_dir, "plotA_tpm_distribution_summary_values.tsv"), sep = "\t")
   fwrite(as.data.table(skew_tbl), file.path(tables_dir, "plotB_tpm_skewness_vs_shet_decile.tsv"), sep = "\t")
   fwrite(as.data.table(centered_skew_tbl), file.path(tables_dir, "plotI_mean_centered_tpm_skewness_vs_shet_decile.tsv"), sep = "\t")
+  fwrite(as.data.table(plotj_skew_tbl), file.path(tables_dir, "plotJ_mean_centered_tpm_skewness_excluding_near_zero_h2_vs_shet_decile.tsv"), sep = "\t")
   fwrite(as.data.table(frac_near0_shet), file.path(tables_dir, "plotC_fraction_near_zero_h2_vs_shet_decile.tsv"), sep = "\t")
   fwrite(as.data.table(frac_near0_tpm), file.path(tables_dir, "plotD_fraction_near_zero_h2_vs_tpm_decile.tsv"), sep = "\t")
   fwrite(as.data.table(h2_shet_all_stats), file.path(tables_dir, "plotE_h2_vs_shet_decile_all_summary_values.tsv"), sep = "\t")
