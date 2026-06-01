@@ -97,11 +97,7 @@ if (!is.finite(h2_frac_cutoff) || h2_frac_cutoff < 0) {
 run_branch_specific_plots <- tolower(Sys.getenv("RUN_BRANCH_SPECIFIC_PLOTS", "false")) %in% c("1", "true", "yes", "y")
 apply_epsilon_filter <- tolower(Sys.getenv("APPLY_EPSILON_FILTER", "true")) %in% c("1", "true", "yes", "y")
 
-analysis_label <- Sys.getenv("ANALYSIS_LABEL", "")
-if (!nzchar(analysis_label)) {
-  analysis_label <- paste0("shet_tmm_h2_plots_v1_", norm2_tag)
-}
-analysis_root <- file.path(runs_dir, "_analysis", analysis_label)
+analysis_root <- file.path(runs_dir, "_analysis", "shet_tmm_h2_plots")
 dir.create(analysis_root, recursive = TRUE, showWarnings = FALSE)
 
 # --------------------------------------------------
@@ -1744,7 +1740,7 @@ if (run_branch_specific_plots) {
       h2_tmm_col = "h2_tmm_irnt",
       h2_tpm_col = "h2_tpm_irnt",
       norm_label = norm2_short,
-      suite_name = paste0("shet_vs_h2_triplet_", norm2_tag)
+      suite_name = "shet_vs_h2_triplet_norm2"
     )
   } else {
     message("Skipping Shet-vs-h2 ", norm2_short, " triplet: no overlap between TMM and TPM ", norm2_short, " h2 tables.")
@@ -1772,7 +1768,7 @@ if (run_branch_specific_plots) {
     df = merged_irnt_tbl,
     h2_col = "h2_tmm_irnt",
     h2_label = norm2_short,
-    suite_name = paste0(tolower(norm2_short), "_only_all_genes"),
+    suite_name = "norm2_only_all_genes",
     suite_subtitle = paste0("All PASS genes with Shet+TPM+TMM ", norm2_short, " h2 overlap")
   )
 
@@ -1780,7 +1776,7 @@ if (run_branch_specific_plots) {
     df = merged_irnt_tbl,
     h2_col = "h2_tmm_irnt",
     h2_label = norm2_short,
-    suite_name = paste0(tolower(norm2_short), "_only_all_genes"),
+    suite_name = "norm2_only_all_genes",
     suite_subtitle = paste0("All PASS genes with Shet+TPM+TMM ", norm2_short, " h2 overlap"),
     shet_reference_tbl = shet_tbl,
     shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
@@ -1805,7 +1801,7 @@ if (run_branch_specific_plots) {
       h2_tmm_col = "h2_tmm_irnt",
       h2_tpm_col = "h2_tpm_irnt",
       norm_label = norm2_short,
-      suite_name = paste0("h2_source_compare_", norm2_tag, "_all_genes"),
+      suite_name = "h2_source_compare_norm2_all_genes",
       suite_subtitle = paste0("Genes with Shet+TPM+both TMM/TPM ", norm2_short, " h2 overlap")
     )
   } else {
@@ -1819,7 +1815,7 @@ if (nrow(merged_pair_all_tbl) > 0L && nrow(merged_pair_tbl) > 0L) {
   run_additional_decile_analyses_pair(
     df_all_pair = merged_pair_all_tbl,
     df_ex_pair = merged_pair_tbl,
-    suite_name = paste0("additional_decile_diagnostics_raw_", norm2_tag)
+    suite_name = "additional_decile_diagnostics_raw_norm2"
   )
 } else {
   message("Skipping additional decile diagnostics RAW+", norm2_short, ": insufficient overlap.")
@@ -1828,13 +1824,13 @@ if (nrow(merged_pair_all_tbl) > 0L && nrow(merged_pair_tbl) > 0L) {
 if (nrow(merged_pair_tbl) > 0L) {
   run_plot_suite_pair(
     df = merged_pair_tbl,
-    suite_name = paste0("raw_", norm2_tag, "_overlap_all_genes"),
+    suite_name = "raw_norm2_overlap_all_genes",
     suite_subtitle = paste0("Genes with Shet+TPM+both TMM RAW/", norm2_short, " h2 overlap")
   )
 
   run_decile_sensitivity_pair(
     df = merged_pair_tbl,
-    suite_name = paste0("raw_", norm2_tag, "_overlap_all_genes"),
+    suite_name = "raw_norm2_overlap_all_genes",
     suite_subtitle = paste0("Genes with Shet+TPM+both TMM RAW/", norm2_short, " h2 overlap"),
     shet_reference_tbl = shet_tbl,
     shet_tpm_overlap_tbl = shet_tpm_overlap_tbl
